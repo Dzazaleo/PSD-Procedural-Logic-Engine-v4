@@ -23,8 +23,45 @@ const getClosestAspectRatio = (width: number, height: number): string => {
     );
 };
 
-// Helper: Generate Image using GenAI SDK and convert to Canvas
-// UPDATE: Added Multi-Modal Support (Text + Image) for Reference-Based Generation
+// Helper: Convert Base64 Data URI to HTMLCanvasElement
+const base64ToCanvas = (base64: string, width: number, height: number): Promise<HTMLCanvasElement | null> => {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                // Determine crop/fit strategy (Cover)
+                const targetRatio = width / height;
+                const srcRatio = img.width / img.height;
+                let renderW, renderH, offsetX, offsetY;
+
+                if (srcRatio > targetRatio) {
+                    renderH = height;
+                    renderW = height * srcRatio;
+                    offsetX = (width - renderW) / 2;
+                    offsetY = 0;
+                } else {
+                    renderW = width;
+                    renderH = width / srcRatio;
+                    offsetX = 0;
+                    offsetY = (height - renderH) / 2;
+                }
+                
+                ctx.drawImage(img, offsetX, offsetY, renderW, renderH);
+                resolve(canvas);
+            } else {
+                resolve(null);
+            }
+        };
+        img.onerror = () => resolve(null);
+        img.src = base64;
+    });
+};
+
+// Helper: Generate Image using GenAI SDK
 const generateLayerImage = async (
     prompt: string, 
     width: number, 
@@ -40,9 +77,7 @@ const generateLayerImage = async (
         // Construct Multi-Modal Request Parts
         const parts: any[] = [];
         
-        // 1. Inject Source Pixels if available (Visual Grounding)
         if (sourceReference) {
-            // Strip data URI header if present to get raw base64
             const base64Data = sourceReference.includes('base64,') 
                 ? sourceReference.split('base64,')[1] 
                 : sourceReference;
@@ -55,12 +90,8 @@ const generateLayerImage = async (
             });
         }
         
-        // 2. Inject Text Prompt
         parts.push({ text: prompt });
 
-        // Use gemini-2.5-flash-image for general image generation tasks
-        // Note: styleStrength is not currently exposed in the official SDK config type for flash-image,
-        // relying on prompt engineering ("high fidelity", "match style") and image input for adherence.
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-image',
             contents: { parts },
@@ -71,7 +102,6 @@ const generateLayerImage = async (
             }
         });
         
-        // Extract base64
         let base64Data = null;
         for (const part of response.candidates?.[0]?.content?.parts || []) {
             if (part.inlineData) {
@@ -81,55 +111,7 @@ const generateLayerImage = async (
         }
         
         if (!base64Data) throw new Error("No image data returned from API");
-        
-        // Convert Base64 to Canvas (ag-psd compatible)
-        return new Promise((resolve) => {
-            const img = new Image();
-            img.onload = () => {
-                const canvas = document.createElement('canvas');
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext('2d');
-                if (ctx) {
-                    // Aspect Ratio Reconciliation
-                    const targetRatio = width / height;
-                    const srcRatio = img.width / img.height;
-                    const deviation = Math.abs((srcRatio - targetRatio) / targetRatio);
-
-                    // Threshold: 1% deviation triggers Smart Crop (Cover)
-                    if (deviation > 0.01) {
-                        let renderW, renderH, offsetX, offsetY;
-                        
-                        // Source is wider -> Scale by Height, Crop Width
-                        if (srcRatio > targetRatio) {
-                            renderH = height;
-                            renderW = height * srcRatio;
-                            offsetY = 0;
-                            offsetX = (width - renderW) / 2;
-                        } 
-                        // Source is taller -> Scale by Width, Crop Height
-                        else {
-                            renderW = width;
-                            renderH = width / srcRatio;
-                            offsetX = 0;
-                            offsetY = (height - renderH) / 2;
-                        }
-
-                        // Apply Object-Fit: Cover
-                        ctx.drawImage(img, offsetX, offsetY, renderW, renderH);
-                    } else {
-                        // Geometric Fit (Stretch) - Deviation is negligible
-                        ctx.drawImage(img, 0, 0, width, height);
-                    }
-                    
-                    resolve(canvas);
-                } else {
-                    resolve(null);
-                }
-            };
-            img.onerror = () => resolve(null);
-            img.src = `data:image/png;base64,${base64Data}`;
-        });
+        return base64ToCanvas(`data:image/png;base64,${base64Data}`, width, height);
 
     } catch (e) {
         console.error("Generative Fill Failed:", e);
@@ -222,7 +204,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
         children: [],
       };
 
-      // B. Synthesis Phase: Pre-generate all AI assets
+      // B. Synthesis Phase: Pre-generate or Reuse AI assets
       const generatedAssets = new Map<string, HTMLCanvasElement>();
       const generationTasks: Promise<void>[] = [];
 
@@ -241,19 +223,36 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
               const findGenerativeLayers = (layers: TransformedLayer[]) => {
                   for (const layer of layers) {
                       if (layer.type === 'generative' && layer.generativePrompt) {
-                          // Create task
-                          const task = async () => {
-                              const canvas = await generateLayerImage(
-                                  layer.generativePrompt!, 
-                                  layer.coords.w, 
-                                  layer.coords.h,
-                                  payload.sourceReference // Pass visual grounding from Analyst
-                              );
-                              if (canvas) {
-                                  generatedAssets.set(layer.id, canvas);
-                              }
-                          };
-                          generationTasks.push(task());
+                          // RECONCILIATION LOGIC:
+                          // If we have a valid confirmed previewUrl, use it as the source-of-truth.
+                          // This corresponds to the "Last Item in Sanitized History Buffer" logic.
+                          if (payload.previewUrl) {
+                              const task = async () => {
+                                  const canvas = await base64ToCanvas(
+                                      payload.previewUrl!, 
+                                      layer.coords.w, 
+                                      layer.coords.h
+                                  );
+                                  if (canvas) {
+                                      generatedAssets.set(layer.id, canvas);
+                                  }
+                              };
+                              generationTasks.push(task());
+                          } else {
+                              // Fallback: Re-synthesize if preview is missing (should not happen in confirmed state)
+                              const task = async () => {
+                                  const canvas = await generateLayerImage(
+                                      layer.generativePrompt!, 
+                                      layer.coords.w, 
+                                      layer.coords.h,
+                                      payload.sourceReference
+                                  );
+                                  if (canvas) {
+                                      generatedAssets.set(layer.id, canvas);
+                                  }
+                              };
+                              generationTasks.push(task());
+                          }
                       }
                       if (layer.children) findGenerativeLayers(layer.children);
                   }
@@ -263,7 +262,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
       }
 
       if (generationTasks.length > 0) {
-          setExportStatus(`Generating ${generationTasks.length} assets...`);
+          setExportStatus(`Compiling ${generationTasks.length} high-fidelity assets...`);
           await Promise.all(generationTasks);
       }
 
@@ -295,10 +294,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
                         canvas: asset // Inject synthetic pixel data
                     };
                 } else {
-                    // Fallback for failed/skipped generation:
-                    // If the asset doesn't exist (because we skipped generation due to lack of confirmation),
-                    // we DO NOT create a placeholder. We simply omit this layer from the export.
-                    // This creates a clean "Geometric Fallback" PSD without red boxes.
+                    // Fallback: Skip if asset generation failed or was not authorized
                     continue; 
                 }
             } 
@@ -339,7 +335,6 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
           if (payload) {
               const sourcePsd = psdRegistry[payload.sourceNodeId];
               // Note: sourcePsd might be missing if purely generative, but reconstructHierarchy handles undefined sourcePsd for gen layers.
-              // However, normal layers REQUIRE sourcePsd.
               
               const reconstructedContent = reconstructHierarchy(
                   payload.layers, 

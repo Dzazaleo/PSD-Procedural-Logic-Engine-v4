@@ -35,6 +35,58 @@ interface ProceduralContextType extends ProceduralState {
 
 const ProceduralContext = createContext<ProceduralContextType | null>(null);
 
+// --- HELPER: Reconcile Terminal State ---
+// Handles the "Handshake" between the transient generative engine and the persistent history buffer.
+// Logic:
+// 1. If incoming payload is TRANSIENT (Ghost): Preserve existing history, update preview.
+// 2. If incoming payload is TERMINAL (Confirmed): 
+//    - Identify if the *previous* state was stable.
+//    - Atomic Push: Bundle the previous stable state into history.
+//    - Prune: Implicitly drops any previous transient states by not pushing them.
+const reconcileTerminalState = (
+    incomingPayload: TransformedPayload, 
+    currentPayload: TransformedPayload | undefined
+): TransformedPayload => {
+    
+    // 1. Establish Baseline History
+    // If no current payload, history is empty. 
+    // If current payload exists, grab its history buffer.
+    const existingHistory = currentPayload?.history || [];
+    
+    // 2. Determine State Transition
+    // Stable -> Stable (Refinement without intermediate ghost)
+    // Stable -> Ghost (Drafting)
+    // Ghost -> Stable (Confirmation)
+    const isIncomingTerminal = incomingPayload.isConfirmed && !incomingPayload.isTransient;
+    const wasPreviousStable = currentPayload && !currentPayload.isTransient && currentPayload.isConfirmed;
+    
+    let nextHistory = existingHistory;
+
+    // 3. Atomic Push Logic
+    // We only commit to history when we receive a verified Terminal State.
+    // The item we commit is the *Previous Stable State* to allow Undo.
+    // If we are just browsing ghosts (Transient), we do NOT touch history.
+    if (isIncomingTerminal) {
+        // Only push if the previous state was actually stable and different
+        // This effectively "Prunes" any ghosts that happened in between, because we never pushed them.
+        if (wasPreviousStable && currentPayload.previewUrl && currentPayload.previewUrl !== incomingPayload.previewUrl) {
+             // Limit buffer size to 10
+             nextHistory = [...existingHistory, currentPayload.previewUrl].slice(-10);
+        }
+    } else {
+        // If incoming is Transient (Ghost), we maintain the *existing* history.
+        // We do not push the ghost to history. 
+        // We do not push the previous state yet (we wait for confirmation).
+        nextHistory = existingHistory;
+    }
+
+    // 4. Return Reconciled Payload
+    return {
+        ...incomingPayload,
+        history: nextHistory
+    };
+};
+
 export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [psdRegistry, setPsdRegistry] = useState<Record<string, Psd>>({});
   const [templateRegistry, setTemplateRegistry] = useState<Record<string, TemplateMetadata>>({});
@@ -57,9 +109,6 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
 
   const registerResolved = useCallback((nodeId: string, handleId: string, context: MappingContext) => {
     // SANITATION LOGIC (Ghost Flushing)
-    // If the Analyst explicitly switches to GEOMETRIC, we must strip any generative artifacts (previewUrl, prompt)
-    // before they are committed to the source of truth. This prevents downstream nodes (Remapper, Export) 
-    // from seeing stale ghosts or attempting to generate invalid content.
     let sanitizedContext = context;
 
     if (context.aiStrategy?.method === 'GEOMETRIC') {
@@ -96,41 +145,17 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
       const nodeRecord = prev[nodeId] || {};
       const currentPayload = nodeRecord[handleId];
 
-      // GHOST HISTORY MANAGEMENT
-      // We want to preserve previous draft versions (history) when a new one arrives.
-      // Logic:
-      // 1. Start with existing history or empty array.
-      // 2. If the current payload has a previewUrl AND it's different from the new one, push it to history.
-      // 3. Attach this history to the new payload object before saving.
-      
-      let nextHistory = currentPayload?.history || [];
-      
-      // Determine if this is a "Visual Update" (Draft Refresh)
-      const hasPreviousUrl = !!(currentPayload && currentPayload.previewUrl);
-      const isNewUrl = hasPreviousUrl && currentPayload!.previewUrl !== payload.previewUrl;
-      const isValidNewUrl = !!payload.previewUrl;
+      // APPLY RECONCILIATION MIDDLEWARE
+      const reconciledPayload = reconcileTerminalState(payload, currentPayload);
 
-      if (isNewUrl && isValidNewUrl) {
-          // Push old URL to history stack
-          // Limit to last 5 versions to prevent memory bloat
-          nextHistory = [...nextHistory, currentPayload!.previewUrl!].slice(-5);
-      }
-
-      // Merge calculated history into the incoming payload
-      // NOTE: We do this merging even if JSON match is true later, effectively ensuring history persistence
-      // across equivalent structural updates.
-      const payloadWithHistory = { ...payload, history: nextHistory };
-
-      if (currentPayload === payloadWithHistory) return prev;
+      if (currentPayload === reconciledPayload) return prev;
 
       // CHECK FOR NON-BILLABLE DRAFT REFRESH (Event Emission)
       if (currentPayload) {
-          const isPreviewChanged = currentPayload.previewUrl !== payload.previewUrl;
-          
-          // Logic: Structural properties (status, requirements) should remain stable during a draft refresh.
+          const isPreviewChanged = currentPayload.previewUrl !== reconciledPayload.previewUrl;
           const isStructureStable = 
-              currentPayload.status === payload.status &&
-              currentPayload.requiresGeneration === payload.requiresGeneration;
+              currentPayload.status === reconciledPayload.status &&
+              currentPayload.requiresGeneration === reconciledPayload.requiresGeneration;
 
           if (isPreviewChanged && isStructureStable) {
                // EMIT EVENT: Notify listeners (RemapperNode UI) of a non-billable visual update.
@@ -140,21 +165,21 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
                        handleId, 
                        type: 'DRAFT_REFRESH',
                        isBillable: false,
-                       newPreviewUrl: payload.previewUrl
+                       newPreviewUrl: reconciledPayload.previewUrl
                    } 
                });
                setTimeout(() => window.dispatchEvent(event), 0);
           }
       }
 
-      // Deep equality check including the history we just injected
-      if (currentPayload && JSON.stringify(currentPayload) === JSON.stringify(payloadWithHistory)) return prev;
+      // Deep equality check
+      if (currentPayload && JSON.stringify(currentPayload) === JSON.stringify(reconciledPayload)) return prev;
 
       return { 
         ...prev, 
         [nodeId]: {
             ...nodeRecord,
-            [handleId]: payloadWithHistory
+            [handleId]: reconciledPayload
         } 
       };
     });
@@ -178,16 +203,14 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     });
   }, []);
 
-  // NEW: Granular update for previews to avoid full re-registration loops
   const updatePreview = useCallback((nodeId: string, handleId: string, url: string) => {
     setPayloadRegistry(prev => {
       const nodeRecord = prev[nodeId];
-      if (!nodeRecord) return prev; // Cannot update preview if payload doesn't exist
+      if (!nodeRecord) return prev; 
       
       const currentPayload = nodeRecord[handleId];
       if (!currentPayload) return prev;
 
-      // Avoid unnecessary updates if URL matches
       if (currentPayload.previewUrl === url) return prev;
 
       return {

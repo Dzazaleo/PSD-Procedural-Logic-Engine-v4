@@ -147,6 +147,7 @@ export interface TransformedPayload {
   requiresGeneration?: boolean;
   previewUrl?: string;
   isConfirmed?: boolean;
+  isTransient?: boolean; // New Flag: Marks in-progress/unconfirmed generative states
   sourceReference?: string; // Carried over from Strategy for Export/Gen use
   history?: string[]; // History of preview URLs for navigation/undo
 }

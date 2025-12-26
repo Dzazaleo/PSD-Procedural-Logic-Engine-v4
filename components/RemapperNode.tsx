@@ -478,6 +478,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
               requiresGeneration: requiresGeneration,
               previewUrl: sourceData.previewUrl || previews[i],
               isConfirmed: isConfirmed,
+              isTransient: !isConfirmed, // Ghost Sanitation: Mark as transient if not confirmed
               sourceReference: sourceData.aiStrategy?.sourceReference
             };
         }
