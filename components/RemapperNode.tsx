@@ -28,7 +28,6 @@ interface InstanceData {
 }
 
 // --- SUB-COMPONENT: Generative Preview Overlay ---
-// (Unchanged from previous version, kept for completeness)
 interface OverlayProps {
     previewUrl?: string | null;
     history?: string[];
@@ -68,10 +67,11 @@ const GenerativePreviewOverlay = ({
     const ratio = w / h;
     const maxWidthStyle = `${240 * ratio}px`;
     
-    const maxIndex = hasDraft ? history.length : Math.max(0, history.length - 1);
+    // Calculate timeline bounds
+    const maxIndex = history.length;
     const currentIndex = activeHistoryIndex !== undefined ? activeHistoryIndex : maxIndex;
     const isLatest = currentIndex === maxIndex;
-    const hasHistory = history.length > 0 || hasDraft;
+    const hasHistory = history.length > 0;
 
     useEffect(() => {
         // Force repaint trigger
@@ -128,7 +128,7 @@ const GenerativePreviewOverlay = ({
                      </div>
                  )}
 
-                 {previewUrl && (
+                 {previewUrl && !isGenerating && (
                      <div className={`absolute top-2 right-2 z-40 flex flex-col items-end transition-opacity duration-300 ${!canConfirm && isLatest && isConfirmed ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
                         {(canConfirm || !isLatest || !isConfirmed) && (
                              <button 
@@ -179,7 +179,7 @@ const GenerativePreviewOverlay = ({
                      </button>
                      
                      <div className="flex space-x-1">
-                         {Array.from({ length: maxIndex + 1 }).map((_, i) => (
+                         {Array.from({ length: maxIndex }).map((_, i) => (
                              <div 
                                 key={i} 
                                 className={`w-1 h-1 rounded-full transition-colors ${i === currentIndex ? 'bg-purple-400' : 'bg-slate-600'}`}
@@ -189,8 +189,8 @@ const GenerativePreviewOverlay = ({
 
                      <button 
                          onClick={(e) => { e.stopPropagation(); onSeek(1); }}
-                         disabled={currentIndex === maxIndex}
-                         className={`p-1 rounded hover:bg-white/10 transition-colors ${currentIndex === maxIndex ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'}`}
+                         disabled={currentIndex >= maxIndex}
+                         className={`p-1 rounded hover:bg-white/10 transition-colors ${currentIndex >= maxIndex ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'}`}
                      >
                          <ChevronRight size={12} />
                      </button>
@@ -214,19 +214,12 @@ const GenerativePreviewOverlay = ({
 
 export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const instanceCount = data.instanceCount || 1;
-  // SOFT LOCK STATE: Stores the PROMPT STRING that was confirmed
   const [confirmations, setConfirmations] = useState<Record<number, string>>({});
   
   // Loading state only. Data state lives in PayloadRegistry.
   const [isGeneratingPreview, setIsGeneratingPreview] = useState<Record<number, boolean>>({});
-  
-  // Track previous prompts to detect changes (In-Flight Logic)
   const lastPromptsRef = useRef<Record<number, string>>({});
-
-  // Blob Revocation Tracking
   const previousBlobsRef = useRef<Record<number, string>>({});
-
-  // OPTIMISTIC UI STATE
   const [displayPreviews, setDisplayPreviews] = useState<Record<number, string>>({});
   const isTransitioningRef = useRef<Record<number, boolean>>({});
 
@@ -251,19 +244,24 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       };
   }, []);
 
-  // Handle Confirmation
+  // EVENT: Confirm / Restore
   const handleConfirmGeneration = (index: number, prompt: string, restoredUrl?: string) => {
       setConfirmations(prev => ({ ...prev, [index]: prompt }));
       
-      // If confirming a history item or draft, update the store to make it canonical
+      const payloadUpdate: Partial<TransformedPayload> = {
+          isConfirmed: true,
+          isTransient: false,
+          generationId: Date.now() // Force a "Commit" event in the store
+      };
+
+      // If restoring from history, explicitly promote the restored URL to current
       if (restoredUrl) {
-          updatePayload(id, `result-out-${index}`, {
-              previewUrl: restoredUrl,
-              isConfirmed: true,
-              isTransient: false,
-              generationId: Date.now() // Force a "Commit" event in the store
-          });
+          payloadUpdate.previewUrl = restoredUrl;
+          // Set source reference to this validated generation for future refinements
+          payloadUpdate.sourceReference = restoredUrl; 
       }
+      
+      updatePayload(id, `result-out-${index}`, payloadUpdate);
   };
 
   const handleImageLoad = useCallback((index: number) => {
@@ -528,7 +526,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     });
   }, [instances, displayPreviews, payloadRegistry, id]);
 
-  // LAZY SYNTHESIS
+  // LAZY SYNTHESIS & MULTI-MODAL GROUNDING
   useEffect(() => {
     instances.forEach(instance => {
         const idx = instance.index;
@@ -544,12 +542,27 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         const hasPreview = !!(storePayload?.previewUrl);
         const needsInitialPreview = isAwaiting && hasPrompt && !hasPreview;
 
+        // GEOMETRIC RESET: If strategy changed to geometric, clear previews
+        if (strategy?.method === 'GEOMETRIC') {
+             if (hasPreview) {
+                 updatePayload(id, `result-out-${idx}`, { previewUrl: undefined, isConfirmed: false, isTransient: false });
+             }
+             return;
+        }
+
+        // REFINEMENT RESET: If prompt changed but we are confirmed, un-confirm to allow new draft
+        if (promptChanged && storePayload?.isConfirmed) {
+             updatePayload(id, `result-out-${idx}`, { isConfirmed: false });
+        }
+
         if (promptChanged || needsInitialPreview) {
              if (isGeneratingPreview[idx] && !promptChanged) return;
              if (currentPrompt) lastPromptsRef.current[idx] = currentPrompt;
 
              const prompt = currentPrompt!;
-             const sourceRef = instance.source.aiStrategy?.sourceReference;
+             // Visual Grounding: Use explicit sourceReference from strategy, 
+             // fallback to current preview if available (for iterative refinement)
+             const sourceRef = instance.source.aiStrategy?.sourceReference || storePayload?.sourceReference;
              
              const generateDraft = async () => {
                  setIsGeneratingPreview(prev => ({...prev, [idx]: true}));
@@ -562,6 +575,8 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                      if (!apiKey) return;
                      const ai = new GoogleGenAI({ apiKey });
                      const parts: any[] = [];
+                     
+                     // VISUAL GROUNDING: Attach Source/Context Image
                      if (sourceRef) {
                          const base64Data = sourceRef.includes('base64,') ? sourceRef.split('base64,')[1] : sourceRef;
                          parts.push({ inlineData: { mimeType: 'image/png', data: base64Data } });

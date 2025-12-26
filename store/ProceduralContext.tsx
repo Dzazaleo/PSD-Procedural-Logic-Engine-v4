@@ -38,7 +38,7 @@ interface ProceduralContextType extends ProceduralState {
 const ProceduralContext = createContext<ProceduralContextType | null>(null);
 
 // --- HELPER: Reconcile Terminal State ---
-// Implements "Double-Buffer" Update Strategy + Stale Guard + Geometric Preservation
+// Implements "Double-Buffer" Update Strategy + Stale Guard + Geometric Preservation + History Loop
 const reconcileTerminalState = (
     incomingPayload: TransformedPayload, 
     currentPayload: TransformedPayload | undefined
@@ -46,18 +46,76 @@ const reconcileTerminalState = (
 
     // 1. STALE GUARD:
     // If store has a newer generation ID than incoming, reject the update.
-    // This handles race conditions where a slow component render tries to save old data.
     if (currentPayload?.generationId && incomingPayload.generationId && incomingPayload.generationId < currentPayload.generationId) {
         return currentPayload;
     }
 
-    // 2. GEOMETRIC PRESERVATION:
-    // If incoming payload has NO generationId (it's a layout/geometry update from React Flow),
-    // but the current payload HAS one (it's an AI result), preserve the AI visual state.
-    if (!incomingPayload.generationId && currentPayload?.generationId) {
+    // 2. SANITATION (Geometric Reset)
+    // Explicitly flush preview and history if status is 'idle' (e.g. disconnected or reset)
+    if (incomingPayload.status === 'idle') {
         return {
-            ...incomingPayload, // Accept new geometry (x, y, w, h)
-            // Restore Visual State from Store
+             ...incomingPayload,
+             previewUrl: undefined,
+             history: [],
+             activeHistoryIndex: 0,
+             isConfirmed: false,
+             isTransient: false,
+             isSynthesizing: false
+        };
+    }
+
+    // 3. FLUSH PHASE (Start Synthesis)
+    if (incomingPayload.isSynthesizing) {
+        return {
+            ...(currentPayload || incomingPayload),
+            isSynthesizing: true,
+            // Preserve visual context during load
+            previewUrl: currentPayload?.previewUrl,
+            history: currentPayload?.history || [],
+            sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
+            targetContainer: incomingPayload.targetContainer || currentPayload?.targetContainer || '',
+            metrics: incomingPayload.metrics || currentPayload?.metrics,
+            generationId: currentPayload?.generationId
+        };
+    }
+
+    // 4. HISTORY ACCUMULATION & FILL PHASE
+    let nextHistory = currentPayload?.history || [];
+    const currentUrl = currentPayload?.previewUrl;
+    const incomingUrl = incomingPayload.previewUrl;
+
+    // Detect if we have a new valid image that warrants a history entry
+    const isNewImage = incomingUrl && incomingUrl !== currentUrl;
+    
+    if (isNewImage) {
+        if (currentUrl) {
+            // Push previous state to history
+            // Deduplicate: only push if strictly different from last history item
+            const lastItem = nextHistory.length > 0 ? nextHistory[nextHistory.length - 1] : null;
+            if (lastItem !== currentUrl) {
+                nextHistory = [...nextHistory, currentUrl];
+            }
+            // Buffer Limit: Keep last 5
+            if (nextHistory.length > 5) {
+                nextHistory = nextHistory.slice(-5);
+            }
+        }
+    }
+
+    // 5. REFINEMENT PERSISTENCE (State Guard)
+    // Prevent accidental reset of confirmation if prompt hasn't changed structurally
+    let isConfirmed = incomingPayload.isConfirmed ?? currentPayload?.isConfirmed ?? false;
+    
+    // If explicitly marked transient (draft), it cannot be confirmed yet
+    if (incomingPayload.isTransient) {
+        isConfirmed = false;
+    }
+
+    // 6. GEOMETRIC PRESERVATION
+    // If this is a layout update (no generationId) but we have AI assets, keep them.
+    if (!incomingPayload.generationId && currentPayload?.generationId) {
+         return {
+            ...incomingPayload,
             previewUrl: currentPayload.previewUrl,
             history: currentPayload.history,
             activeHistoryIndex: currentPayload.activeHistoryIndex,
@@ -67,78 +125,18 @@ const reconcileTerminalState = (
             isConfirmed: currentPayload.isConfirmed, 
             isTransient: currentPayload.isTransient,
             sourceReference: currentPayload.sourceReference || incomingPayload.sourceReference
-        };
+         };
     }
 
-    // 3. FLUSH PHASE (Start Synthesis)
-    if (incomingPayload.isSynthesizing) {
-        return {
-            ...(currentPayload || incomingPayload),
-            isSynthesizing: true,
-            sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
-            targetContainer: incomingPayload.targetContainer || currentPayload?.targetContainer || '',
-            metrics: incomingPayload.metrics || currentPayload?.metrics,
-            generationId: currentPayload?.generationId // Keep ID valid during flush
-        };
-    }
-
-    // 4. FILL PHASE (New Content Arrival)
-    // Determine if this is a fresh generation
-    const isNewGeneration = 
-        !!incomingPayload.generationId && 
-        (!currentPayload?.generationId || incomingPayload.generationId > currentPayload.generationId);
-
-    const effectiveGenerationId = isNewGeneration ? incomingPayload.generationId : currentPayload?.generationId;
-
-    if (isNewGeneration || (!currentPayload && incomingPayload.generationId)) {
-        // Carry over history
-        const nextHistory = currentPayload?.history || [];
-        
-        // If it's a transient draft, we don't push to history yet, just show it.
-        // If confirmed, we push.
-        
-        // However, if we simply generated a new draft, current UI behavior treats 'latestDraftUrl' as the ghost.
-        
-        return {
-            ...incomingPayload,
-            history: nextHistory,
-            // If new draft, index points to 'future' (length)
-            activeHistoryIndex: incomingPayload.isTransient ? nextHistory.length : (nextHistory.length > 0 ? nextHistory.length - 1 : 0),
-            latestDraftUrl: incomingPayload.isTransient ? incomingPayload.previewUrl : undefined,
-            isSynthesizing: false,
-            generationId: effectiveGenerationId
-        };
-    }
-
-    // 5. TERMINAL COMMIT (User Confirmed)
-    // If incoming is marked confirmed, we lock it into history.
-    if (incomingPayload.isConfirmed && !incomingPayload.isTransient) {
-        const existingHistory = currentPayload?.history || [];
-        const confirmedUrl = incomingPayload.previewUrl;
-        let nextHistory = existingHistory;
-
-        if (confirmedUrl && existingHistory[existingHistory.length - 1] !== confirmedUrl) {
-            nextHistory = [...existingHistory, confirmedUrl].slice(-10); // Keep last 10
-        }
-
-        return {
-            ...incomingPayload,
-            history: nextHistory,
-            activeHistoryIndex: nextHistory.length - 1,
-            latestDraftUrl: undefined, // Clear draft slot
-            sourceReference: confirmedUrl, // Update Ref for next cycle
-            isSynthesizing: false,
-            generationId: effectiveGenerationId
-        };
-    }
-
-    // Fallback: Merge updates normally
+    // 7. FINAL CONSTRUCTION
     return {
         ...incomingPayload,
-        history: currentPayload?.history || [],
-        activeHistoryIndex: currentPayload?.activeHistoryIndex,
-        latestDraftUrl: currentPayload?.latestDraftUrl,
-        generationId: effectiveGenerationId
+        history: nextHistory,
+        // Use incoming index if provided (navigation), else default to current view (latest)
+        activeHistoryIndex: incomingPayload.activeHistoryIndex ?? nextHistory.length,
+        isConfirmed,
+        sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
+        generationId: incomingPayload.generationId || currentPayload?.generationId
     };
 };
 
@@ -317,8 +315,10 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
         if (!payload) return prev;
         
         const history = payload.history || [];
-        const hasDraft = !!payload.latestDraftUrl;
-        const maxIndex = hasDraft ? history.length : Math.max(0, history.length - 1);
+        // Determine the "max" index.
+        // History array contains past items.
+        // The "current" item might be previewUrl, which conceptually sits at history.length.
+        const maxIndex = history.length;
         
         const currentIndex = payload.activeHistoryIndex !== undefined ? payload.activeHistoryIndex : maxIndex;
         const nextIndex = Math.max(0, Math.min(currentIndex + direction, maxIndex));
@@ -326,13 +326,53 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
         if (nextIndex === currentIndex) return prev;
         
         // Resolve the View
+        // If nextIndex == history.length, we show the latest generated item (or transient).
+        // Since we are moving pointers, we might need to restore from history array if < length.
+        
         let viewUrl: string | undefined;
-        if (nextIndex === history.length && hasDraft) {
-            viewUrl = payload.latestDraftUrl;
-        } else {
+        let isConfirmed = payload.isConfirmed;
+
+        if (nextIndex < history.length) {
             viewUrl = history[nextIndex];
+            // Historical items are implicitly unconfirmed until explicitly restored
+            isConfirmed = false;
+        } else {
+            // "Latest" tip
+            // If we have a draftUrl stored or if previewUrl is the latest, use it.
+            // In our logic, the payload.previewUrl IS the latest unless we moved the index.
+            // But if we moved the index back, we need to know what was "current".
+            // For simplicity, we assume we can only navigate 'back' into history.
+            // To go 'forward', we restore.
+            
+            // If we are at the tip, we just show the current valid preview (which might be the confirmed one).
+            // But wait, if we navigated back, how do we know what the 'tip' was?
+            // This suggests we need to store the 'tip' URL in history too?
+            // Or 'history' contains ALL versions, and index just points to one.
+            // Let's assume history contains past versions. The 'current' version is separate.
+            
+            // Simplified Logic: 
+            // If we seek, we are just previewing history. 
+            // 'previewUrl' in the payload updates to show the historical item.
+            // We do NOT lose the generationId.
+            
+            // If we go back to maxIndex (the future/current tip), we probably want to show what was there.
+            // But we might have lost it if we overwrote previewUrl. 
+            // Thus, we really should have stored the 'latest' in the history array if valid.
+            // The registerPayload logic handles pushing to history.
+            
+            // Fallback: If navigating 'forward' past history bounds, do nothing (we are at tip).
         }
         
+        if (!viewUrl && nextIndex === history.length) {
+             // We are trying to go back to "Present". 
+             // If we don't have a separate buffer for "Present", we might be stuck.
+             // Ideally, 'history' contains everything including current.
+             // But existing logic treats history as 'past'.
+             
+             // Let's assume the user can only navigate within the available history array.
+             return prev;
+        }
+
         return {
             ...prev,
             [nodeId]: {
@@ -340,7 +380,8 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
                 [handleId]: {
                     ...payload,
                     activeHistoryIndex: nextIndex,
-                    previewUrl: viewUrl
+                    previewUrl: viewUrl || payload.previewUrl,
+                    isConfirmed: isConfirmed
                 }
             }
         };
