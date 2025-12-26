@@ -3,7 +3,7 @@ import { Handle, Position, NodeProps, useEdges, useReactFlow, useNodes } from 'r
 import { PSDNodeData, SerializableLayer, TransformedPayload, TransformedLayer, MAX_BOUNDARY_VIOLATION_PERCENT, LayoutStrategy } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { GoogleGenAI } from "@google/genai";
-import { ChevronLeft, ChevronRight, Check } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Check, Sparkles } from 'lucide-react';
 
 interface InstanceData {
   index: number;
@@ -225,6 +225,10 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   // Consume data from Store
   const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, updatePayload, seekHistory, unregisterNode } = useProceduralStore();
 
+  // GLOBAL GATE: Master Switch from Node Data
+  // We use `any` casting because we are extending the flexible ReactFlow data object
+  const globalGenerationAllowed = (data as any).remapperConfig?.generationAllowed ?? true;
+
   useEffect(() => {
     return () => unregisterNode(id);
   }, [id, unregisterNode]);
@@ -239,23 +243,72 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       };
   }, []);
 
-  // EVENT: Confirm / Restore / Promote
+  // --- ACTIONS ---
+
+  // 1. GLOBAL TOGGLE ACTION
+  const handleGlobalToggle = useCallback(() => {
+      const newState = !globalGenerationAllowed;
+      
+      // Update Node Data (Persistence)
+      setNodes(nds => nds.map(n => {
+          if (n.id === id) {
+              return {
+                  ...n,
+                  data: {
+                      ...n.data,
+                      remapperConfig: {
+                          ...(n.data.remapperConfig || { targetContainerName: null }),
+                          generationAllowed: newState
+                      }
+                  }
+              };
+          }
+          return n;
+      }));
+
+      // Destructive Reset: If turning OFF, clear all local state immediately
+      if (!newState) {
+          setConfirmations({});
+          setDisplayPreviews({});
+          setIsGeneratingPreview({});
+      }
+  }, [id, setNodes, globalGenerationAllowed]);
+
+  // 2. INSTANCE TOGGLE ACTION
+  const handleInstanceToggle = useCallback((index: number, currentAllowed: boolean) => {
+      const newState = !currentAllowed;
+      
+      // Update Store Payload (Persistence)
+      // Note: If we turn it OFF, the store will strip the previewUrl automatically via reconcileTerminalState
+      updatePayload(id, `result-out-${index}`, { generationAllowed: newState });
+
+      // Destructive Reset Local State
+      if (!newState) {
+          setConfirmations(prev => {
+              const next = { ...prev };
+              delete next[index];
+              return next;
+          });
+          setDisplayPreviews(prev => {
+              const next = { ...prev };
+              delete next[index];
+              return next;
+          });
+      }
+  }, [id, updatePayload]);
+
+  // 3. CONFIRM ACTION
   const handleConfirmGeneration = useCallback((index: number, prompt: string, confirmedUrl?: string) => {
       if (!confirmedUrl) return;
 
-      // Lock the prompt that generated this specific image to detect future refinements
       setConfirmations(prev => ({ ...prev, [index]: prompt }));
       
-      // EXCLUSIVE PROMOTION LOGIC:
-      // 1. Set the confirmUrl as the new 'previewUrl' (Source of Truth)
-      // 2. Mark isConfirmed: true (Allow Export)
-      // 3. Update sourceReference (Visual Grounding for next iter)
       updatePayload(id, `result-out-${index}`, {
           previewUrl: confirmedUrl,
           isConfirmed: true,
           isTransient: false,
           sourceReference: confirmedUrl,
-          generationId: Date.now() // Force refresh
+          generationId: Date.now()
       });
   }, [id, updatePayload]);
 
@@ -440,6 +493,11 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
             // FETCH STATE FROM STORE (Single Source of Truth)
             const storePayload = payloadRegistry[id]?.[`result-out-${i}`];
 
+            // LOGIC GATE RESOLUTION
+            const localAllowed = storePayload?.generationAllowed ?? true;
+            // The master switch overrides local preference
+            const effectiveAllowed = globalGenerationAllowed && localAllowed;
+
             payload = {
               status: status,
               sourceNodeId: sourceData.nodeId,
@@ -459,7 +517,9 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
               history: storePayload?.history,
               activeHistoryIndex: storePayload?.activeHistoryIndex,
               latestDraftUrl: storePayload?.latestDraftUrl,
-              isSynthesizing: storePayload?.isSynthesizing
+              isSynthesizing: storePayload?.isSynthesizing,
+              // PROPAGATE GATE STATE
+              generationAllowed: effectiveAllowed 
             };
         }
 
@@ -473,18 +533,15 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     }
 
     return result;
-  }, [instanceCount, edges, id, resolvedRegistry, templateRegistry, nodes, confirmations, payloadRegistry]);
+  }, [instanceCount, edges, id, resolvedRegistry, templateRegistry, nodes, confirmations, payloadRegistry, globalGenerationAllowed]);
 
-  // Sync Payloads to Store (Standard update for non-generative changes)
+  // Sync Payloads to Store
   useEffect(() => {
     instances.forEach(instance => {
         // We only register if the payload is purely geometric (no generation ID yet)
         // OR if the generation ID matches the current one (stable).
         // This avoids overwriting a fresh AI generation with a geometric calculation that lacks the ID.
         if (instance.payload && !isGeneratingPreview[instance.index]) {
-             // If store has a generationId but we don't, it means we are just calculating geometry.
-             // We pass undefined generationId so store knows it's a geometry update and preserves the image.
-             // The useMemo logic above ALREADY reads generationId from store, so instance.payload SHOULD have it.
              registerPayload(id, `result-out-${instance.index}`, instance.payload);
         }
     });
@@ -525,6 +582,10 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   useEffect(() => {
     instances.forEach(instance => {
         const idx = instance.index;
+        
+        // GATE CHECK: Stop synthesis if generation is disallowed
+        if (!instance.payload?.generationAllowed) return;
+
         const strategy = instance.source.aiStrategy;
         const currentPrompt = strategy?.generativePrompt;
         
@@ -546,15 +607,12 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         }
 
         // AUTOMATED REFINEMENT RESET
-        // If the upstream prompt differs from what we locked in confirmations, we must revoke confirmation.
-        // This forces re-verification of the new design.
         const lockedPrompt = confirmations[idx];
         const isRefinementDetected = !!currentPrompt && !!lockedPrompt && currentPrompt !== lockedPrompt;
 
         if (isRefinementDetected && storePayload?.isConfirmed) {
              console.log(`[Remapper] Refinement detected for #${idx}. Revoking confirmation.`);
              updatePayload(id, `result-out-${idx}`, { isConfirmed: false });
-             // We do NOT return here, because we might need to trigger a new draft below
         }
 
         if (promptChanged || needsInitialPreview) {
@@ -562,8 +620,6 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              if (currentPrompt) lastPromptsRef.current[idx] = currentPrompt;
 
              const prompt = currentPrompt!;
-             // Visual Grounding: Use explicit sourceReference from strategy, 
-             // fallback to current preview if available (for iterative refinement)
              const sourceRef = instance.source.aiStrategy?.sourceReference || storePayload?.sourceReference;
              
              const generateDraft = async () => {
@@ -578,7 +634,6 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                      const ai = new GoogleGenAI({ apiKey });
                      const parts: any[] = [];
                      
-                     // VISUAL GROUNDING: Attach Source/Context Image
                      if (sourceRef) {
                          const base64Data = sourceRef.includes('base64,') ? sourceRef.split('base64,')[1] : sourceRef;
                          parts.push({ inlineData: { mimeType: 'image/png', data: base64Data } });
@@ -609,12 +664,11 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                          previousBlobsRef.current[idx] = url;
 
                          // PHASE 2: FILL
-                         // Send to Store directly. Do NOT set local state.
                          updatePayload(id, `result-out-${idx}`, {
                              previewUrl: url,
                              isTransient: true,
                              isSynthesizing: false,
-                             generationId: Date.now() // NEW TIMESTAMP
+                             generationId: Date.now()
                          });
                      }
 
@@ -649,7 +703,14 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
            </svg>
            <span className="text-sm font-semibold text-indigo-100">Procedural Remapper</span>
          </div>
-         <div className="flex flex-col items-end">
+         <div className="flex items-center space-x-2">
+             <button 
+                onClick={(e) => { e.stopPropagation(); handleGlobalToggle(); }}
+                className={`p-1 rounded transition-colors ${globalGenerationAllowed ? 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/40' : 'bg-slate-700/50 text-slate-500 hover:bg-slate-700'}`}
+                title={globalGenerationAllowed ? "Master Gate: AI Enabled" : "Master Gate: AI Disabled"}
+             >
+                 <Sparkles className="w-3.5 h-3.5" fill={globalGenerationAllowed ? "currentColor" : "none"} />
+             </button>
              <span className="text-[10px] text-indigo-400/70 font-mono">TRANSFORMER</span>
          </div>
       </div>
@@ -662,25 +723,29 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              const confirmedPrompt = confirmations[instance.index];
              const isConfirmed = !!currentPrompt && currentPrompt === confirmedPrompt;
              const refinementPending = !!confirmedPrompt && !!currentPrompt && confirmedPrompt !== currentPrompt;
-             const showOverlay = hasPreview || isAwaiting || refinementPending;
+             
+             // LOGIC GATE CHECK for UI
+             // We use the payload's gate state which is already (global && local)
+             // But for the instance toggle UI, we want to show the LOCAL preference status if possible,
+             // or just show the effective state. The payload stores the effective state computed in useMemo.
+             // If effective is false, we show deactivated.
+             const effectiveAllowed = instance.payload?.generationAllowed ?? true;
+             
+             // Only show overlay if AI is allowed
+             const showOverlay = effectiveAllowed && (hasPreview || isAwaiting || refinementPending);
 
              // Fetch History directly from Store Payload (Source of Truth for Navigation)
              const storePayload = payloadRegistry[id]?.[`result-out-${instance.index}`];
              const history = storePayload?.history || [];
              const activeIndex = storePayload?.activeHistoryIndex;
              const latestDraft = storePayload?.latestDraftUrl;
-             // The storePayload also holds the canonical confirmed URL which might differ from local calculation if navigation occurred
              const persistedPreview = storePayload?.previewUrl;
              const storeIsSynthesizing = storePayload?.isSynthesizing;
              const storeConfirmed = storePayload?.isConfirmed;
 
-             // Prioritize Store Payload (if valid) > Optimistic Display > Instance Local > Draft
              const effectivePreview = persistedPreview || displayPreviews[instance.index] || instance.payload?.previewUrl;
-
-             // Pass the CONFIRMED URL for the next iteration step (Soft-Lock Refinement)
              const iterativeSource = storePayload?.sourceReference || instance.payload?.sourceReference;
              
-             // Consolidate synthesis state
              const isEffectiveGenerating = !!isGeneratingPreview[instance.index] || !!storeIsSynthesizing;
 
              return (
@@ -690,7 +755,16 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                    <div className="relative flex items-center justify-between group">
                       <div className="flex flex-col w-full">
                           <div className="flex items-center justify-between mb-0.5">
-                             <label className="text-[9px] uppercase text-slate-500 font-bold tracking-wider ml-1">Source Input</label>
+                             <div className="flex items-center space-x-1.5">
+                                 <label className="text-[9px] uppercase text-slate-500 font-bold tracking-wider ml-1">Source Input</label>
+                                 <button 
+                                    onClick={(e) => { e.stopPropagation(); handleInstanceToggle(instance.index, effectiveAllowed); }}
+                                    className={`p-0.5 rounded transition-colors ${effectiveAllowed ? 'text-purple-400 hover:text-purple-300' : 'text-slate-600 hover:text-slate-500'}`}
+                                    title="Toggle Generative AI for this instance"
+                                 >
+                                     <Sparkles className="w-3 h-3" fill={effectiveAllowed ? "currentColor" : "none"} />
+                                 </button>
+                             </div>
                              {instance.source.ready && <span className="text-[8px] text-blue-400 font-mono">LINKED</span>}
                           </div>
                           
@@ -755,8 +829,11 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                    {instance.strategyUsed && (
                                        <span className="text-[8px] bg-pink-500/20 text-pink-300 px-1 rounded border border-pink-500/40">AI ENHANCED</span>
                                    )}
-                                   {instance.payload.requiresGeneration && (
+                                   {instance.payload.requiresGeneration && effectiveAllowed && (
                                        <span className="text-[8px] bg-purple-500/20 text-purple-300 px-1 rounded border border-purple-500/40">GEN</span>
+                                   )}
+                                   {!effectiveAllowed && (
+                                       <span className="text-[8px] bg-slate-700 text-slate-400 px-1 rounded border border-slate-600">AI MUTED</span>
                                    )}
                                </div>
                                <span className="text-[10px] text-slate-400 font-mono">{instance.payload.scaleFactor.toFixed(2)}x Scale</span>

@@ -81,6 +81,7 @@ export interface LayoutStrategy {
   // Logic Gate Flags
   isExplicitIntent?: boolean;
   clearance?: boolean;
+  generationAllowed?: boolean; // New Flag: Master switch for generation
   // Visual Grounding
   sourceReference?: string; // Base64 pixel data of the source container
 }
@@ -107,6 +108,7 @@ export interface MappingContext {
   previewUrl?: string; 
   // Explicit Target Dimensions for deterministic rendering
   targetDimensions?: { w: number, h: number };
+  generationAllowed?: boolean; // New Flag: Propagated gate state
 }
 
 export interface ValidationIssue {
@@ -154,6 +156,7 @@ export interface TransformedPayload {
   activeHistoryIndex?: number; // Pointer for time-travel navigation
   latestDraftUrl?: string; // Holding pen for the Active Ghost when browsing history
   generationId?: number; // Timestamp of the specific generation to force React updates
+  generationAllowed?: boolean; // New Flag: Enforcement state
 }
 
 export interface RemapperConfig {

@@ -38,11 +38,32 @@ interface ProceduralContextType extends ProceduralState {
 const ProceduralContext = createContext<ProceduralContextType | null>(null);
 
 // --- HELPER: Reconcile Terminal State ---
-// Implements "Double-Buffer" Update Strategy + Stale Guard + Geometric Preservation + History Loop
+// Implements "Double-Buffer" Update Strategy + Stale Guard + Geometric Preservation + History Loop + Logic Gate
 const reconcileTerminalState = (
     incomingPayload: TransformedPayload, 
     currentPayload: TransformedPayload | undefined
 ): TransformedPayload => {
+
+    // 0. GENERATIVE LOGIC GATE: HARD STOP
+    // If generation is explicitly disallowed, we must strip all generative assets immediately.
+    // This acts as a "Kill Switch" for the pipeline.
+    if (incomingPayload.generationAllowed === false) {
+        return {
+            ...incomingPayload,
+            // Destructive Strip:
+            previewUrl: undefined,
+            history: [],
+            activeHistoryIndex: 0,
+            isConfirmed: false,
+            isTransient: false,
+            isSynthesizing: false,
+            requiresGeneration: false,
+            latestDraftUrl: undefined,
+            // Preserve geometric data
+            metrics: incomingPayload.metrics,
+            layers: incomingPayload.layers.filter(l => l.type !== 'generative') // Remove generative layers
+        };
+    }
 
     // 1. STALE GUARD:
     // If store has a newer generation ID than incoming, reject the update.
@@ -75,7 +96,8 @@ const reconcileTerminalState = (
             sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
             targetContainer: incomingPayload.targetContainer || currentPayload?.targetContainer || '',
             metrics: incomingPayload.metrics || currentPayload?.metrics,
-            generationId: currentPayload?.generationId
+            generationId: currentPayload?.generationId,
+            generationAllowed: true
         };
     }
 
@@ -124,7 +146,8 @@ const reconcileTerminalState = (
             isSynthesizing: currentPayload.isSynthesizing,
             isConfirmed: currentPayload.isConfirmed, 
             isTransient: currentPayload.isTransient,
-            sourceReference: currentPayload.sourceReference || incomingPayload.sourceReference
+            sourceReference: currentPayload.sourceReference || incomingPayload.sourceReference,
+            generationAllowed: true
          };
     }
 
@@ -136,7 +159,8 @@ const reconcileTerminalState = (
         activeHistoryIndex: incomingPayload.activeHistoryIndex ?? nextHistory.length,
         isConfirmed,
         sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
-        generationId: incomingPayload.generationId || currentPayload?.generationId
+        generationId: incomingPayload.generationId || currentPayload?.generationId,
+        generationAllowed: true
     };
 };
 
@@ -164,7 +188,25 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     // SANITATION LOGIC (Ghost Flushing)
     let sanitizedContext = context;
 
-    if (context.aiStrategy?.method === 'GEOMETRIC') {
+    // Check Logic Gate: Is generation permitted?
+    // We check specifically if allowed is FALSE. Undefined implies allowed (default).
+    // Or we can be strict. Let's assume explicit disablement is required to trigger stripping.
+    const isGenerationDisallowed = context.generationAllowed === false || context.aiStrategy?.generationAllowed === false;
+
+    if (isGenerationDisallowed) {
+        sanitizedContext = {
+            ...context,
+            // Flush Ghost Preview
+            previewUrl: undefined,
+            // Flush Generative Intent
+            aiStrategy: context.aiStrategy ? {
+                ...context.aiStrategy,
+                generativePrompt: '',
+                generationAllowed: false
+            } : undefined,
+            generationAllowed: false
+        };
+    } else if (context.aiStrategy?.method === 'GEOMETRIC') {
         sanitizedContext = {
             ...context,
             // Flush Ghost Preview
@@ -343,12 +385,6 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
             // But if we moved the index back, we need to know what was "current".
             // For simplicity, we assume we can only navigate 'back' into history.
             // To go 'forward', we restore.
-            
-            // If we are at the tip, we just show the current valid preview (which might be the confirmed one).
-            // But wait, if we navigated back, how do we know what the 'tip' was?
-            // This suggests we need to store the 'tip' URL in history too?
-            // Or 'history' contains ALL versions, and index just points to one.
-            // Let's assume history contains past versions. The 'current' version is separate.
             
             // Simplified Logic: 
             // If we seek, we are just previewing history. 
