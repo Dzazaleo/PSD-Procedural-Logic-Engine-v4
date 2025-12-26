@@ -45,8 +45,8 @@ const reconcileTerminalState = (
 ): TransformedPayload => {
 
     // 0. GENERATIVE LOGIC GATE: HARD STOP
-    // If generation is explicitly disallowed, we must strip all generative assets immediately.
-    // This acts as a "Kill Switch" for the pipeline.
+    // If generation is explicitly disallowed (per-instance toggle), we must strip all generative assets immediately.
+    // This acts as a "Kill Switch" for the pipeline's specific instance.
     if (incomingPayload.generationAllowed === false) {
         return {
             ...incomingPayload,
@@ -57,11 +57,12 @@ const reconcileTerminalState = (
             isConfirmed: false,
             isTransient: false,
             isSynthesizing: false,
-            requiresGeneration: false,
+            requiresGeneration: false, // Ensure downstream nodes know generation is off
             latestDraftUrl: undefined,
             // Preserve geometric data
             metrics: incomingPayload.metrics,
-            layers: incomingPayload.layers.filter(l => l.type !== 'generative') // Remove generative layers
+            // Visually remove any layers marked as generative
+            layers: incomingPayload.layers.filter(l => l.type !== 'generative') 
         };
     }
 
@@ -241,6 +242,7 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
       const currentPayload = nodeRecord[handleId];
 
       // APPLY RECONCILIATION MIDDLEWARE
+      // This enforces logic gates, history, and state transitions
       const reconciledPayload = reconcileTerminalState(payload, currentPayload);
 
       // Deep equality check optimization
@@ -357,9 +359,6 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
         if (!payload) return prev;
         
         const history = payload.history || [];
-        // Determine the "max" index.
-        // History array contains past items.
-        // The "current" item might be previewUrl, which conceptually sits at history.length.
         const maxIndex = history.length;
         
         const currentIndex = payload.activeHistoryIndex !== undefined ? payload.activeHistoryIndex : maxIndex;
@@ -367,45 +366,15 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
         
         if (nextIndex === currentIndex) return prev;
         
-        // Resolve the View
-        // If nextIndex == history.length, we show the latest generated item (or transient).
-        // Since we are moving pointers, we might need to restore from history array if < length.
-        
         let viewUrl: string | undefined;
         let isConfirmed = payload.isConfirmed;
 
         if (nextIndex < history.length) {
             viewUrl = history[nextIndex];
-            // Historical items are implicitly unconfirmed until explicitly restored
             isConfirmed = false;
-        } else {
-            // "Latest" tip
-            // If we have a draftUrl stored or if previewUrl is the latest, use it.
-            // In our logic, the payload.previewUrl IS the latest unless we moved the index.
-            // But if we moved the index back, we need to know what was "current".
-            // For simplicity, we assume we can only navigate 'back' into history.
-            // To go 'forward', we restore.
-            
-            // Simplified Logic: 
-            // If we seek, we are just previewing history. 
-            // 'previewUrl' in the payload updates to show the historical item.
-            // We do NOT lose the generationId.
-            
-            // If we go back to maxIndex (the future/current tip), we probably want to show what was there.
-            // But we might have lost it if we overwrote previewUrl. 
-            // Thus, we really should have stored the 'latest' in the history array if valid.
-            // The registerPayload logic handles pushing to history.
-            
-            // Fallback: If navigating 'forward' past history bounds, do nothing (we are at tip).
-        }
+        } 
         
         if (!viewUrl && nextIndex === history.length) {
-             // We are trying to go back to "Present". 
-             // If we don't have a separate buffer for "Present", we might be stuck.
-             // Ideally, 'history' contains everything including current.
-             // But existing logic treats history as 'past'.
-             
-             // Let's assume the user can only navigate within the available history array.
              return prev;
         }
 

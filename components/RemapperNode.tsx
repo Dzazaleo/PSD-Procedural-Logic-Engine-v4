@@ -209,6 +209,8 @@ const GenerativePreviewOverlay = ({
 
 export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const instanceCount = data.instanceCount || 1;
+  const instanceSettings = data.instanceSettings || {};
+
   const [confirmations, setConfirmations] = useState<Record<number, string>>({});
   
   // Loading state only. Data state lives in PayloadRegistry.
@@ -226,7 +228,6 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, updatePayload, seekHistory, unregisterNode } = useProceduralStore();
 
   // GLOBAL GATE: Master Switch from Node Data
-  // We use `any` casting because we are extending the flexible ReactFlow data object
   const globalGenerationAllowed = (data as any).remapperConfig?.generationAllowed ?? true;
 
   useEffect(() => {
@@ -249,7 +250,6 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const handleGlobalToggle = useCallback(() => {
       const newState = !globalGenerationAllowed;
       
-      // Update Node Data (Persistence)
       setNodes(nds => nds.map(n => {
           if (n.id === id) {
               return {
@@ -266,7 +266,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
           return n;
       }));
 
-      // Destructive Reset: If turning OFF, clear all local state immediately
+      // Destructive Reset
       if (!newState) {
           setConfirmations({});
           setDisplayPreviews({});
@@ -274,13 +274,27 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       }
   }, [id, setNodes, globalGenerationAllowed]);
 
-  // 2. INSTANCE TOGGLE ACTION
+  // 2. INSTANCE TOGGLE ACTION (PERSISTENT)
   const handleInstanceToggle = useCallback((index: number, currentAllowed: boolean) => {
       const newState = !currentAllowed;
       
-      // Update Store Payload (Persistence)
-      // Note: If we turn it OFF, the store will strip the previewUrl automatically via reconcileTerminalState
-      updatePayload(id, `result-out-${index}`, { generationAllowed: newState });
+      // Update Node Data (Persistence Source of Truth)
+      setNodes(nds => nds.map(node => {
+        if (node.id === id) {
+            const currentSettings = node.data.instanceSettings || {};
+            return {
+                ...node,
+                data: {
+                    ...node.data,
+                    instanceSettings: {
+                        ...currentSettings,
+                        [index]: { ...currentSettings[index], generationAllowed: newState }
+                    }
+                }
+            };
+        }
+        return node;
+      }));
 
       // Destructive Reset Local State
       if (!newState) {
@@ -294,8 +308,9 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
               delete next[index];
               return next;
           });
+          setIsGeneratingPreview(prev => ({...prev, [index]: false}));
       }
-  }, [id, updatePayload]);
+  }, [id, setNodes]);
 
   // 3. CONFIRM ACTION
   const handleConfirmGeneration = useCallback((index: number, prompt: string, confirmedUrl?: string) => {
@@ -324,6 +339,11 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     for (let i = 0; i < instanceCount; i++) {
         const sourceHandleId = `source-in-${i}`;
         const targetHandleId = `target-in-${i}`;
+
+        // Resolve Local Generation Setting
+        const localSettings = instanceSettings[i];
+        const localAllowed = localSettings?.generationAllowed ?? true; // Default to true if undefined
+        const effectiveAllowed = globalGenerationAllowed && localAllowed;
 
         // 1. Resolve Source
         let sourceData: any = { ready: false };
@@ -490,13 +510,8 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                 transformedLayers.unshift(genLayer);
             }
             
-            // FETCH STATE FROM STORE (Single Source of Truth)
+            // FETCH STATE FROM STORE (Single Source of Truth for existing preview)
             const storePayload = payloadRegistry[id]?.[`result-out-${i}`];
-
-            // LOGIC GATE RESOLUTION
-            const localAllowed = storePayload?.generationAllowed ?? true;
-            // The master switch overrides local preference
-            const effectiveAllowed = globalGenerationAllowed && localAllowed;
 
             payload = {
               status: status,
@@ -518,7 +533,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
               activeHistoryIndex: storePayload?.activeHistoryIndex,
               latestDraftUrl: storePayload?.latestDraftUrl,
               isSynthesizing: storePayload?.isSynthesizing,
-              // PROPAGATE GATE STATE
+              // PROPAGATE GATE STATE (Crucial for Store logic to act on)
               generationAllowed: effectiveAllowed 
             };
         }
@@ -533,7 +548,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     }
 
     return result;
-  }, [instanceCount, edges, id, resolvedRegistry, templateRegistry, nodes, confirmations, payloadRegistry, globalGenerationAllowed]);
+  }, [instanceCount, edges, id, resolvedRegistry, templateRegistry, nodes, confirmations, payloadRegistry, globalGenerationAllowed, instanceSettings]);
 
   // Sync Payloads to Store
   useEffect(() => {
@@ -583,8 +598,14 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     instances.forEach(instance => {
         const idx = instance.index;
         
-        // GATE CHECK: Stop synthesis if generation is disallowed
-        if (!instance.payload?.generationAllowed) return;
+        // SYNTHESIS GUARD: Strictly check per-instance permission in the payload
+        if (!instance.payload?.generationAllowed) {
+            // Ensure local preview state is cleared if gate is closed (redundancy)
+            if (isGeneratingPreview[idx]) {
+                setIsGeneratingPreview(prev => ({...prev, [idx]: false}));
+            }
+            return;
+        }
 
         const strategy = instance.source.aiStrategy;
         const currentPrompt = strategy?.generativePrompt;
@@ -725,10 +746,8 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              const refinementPending = !!confirmedPrompt && !!currentPrompt && confirmedPrompt !== currentPrompt;
              
              // LOGIC GATE CHECK for UI
-             // We use the payload's gate state which is already (global && local)
-             // But for the instance toggle UI, we want to show the LOCAL preference status if possible,
-             // or just show the effective state. The payload stores the effective state computed in useMemo.
-             // If effective is false, we show deactivated.
+             // We use the payload's gate state which reflects (Global && Local)
+             // However, for the toggle UI itself, we want to reflect the permission state.
              const effectiveAllowed = instance.payload?.generationAllowed ?? true;
              
              // Only show overlay if AI is allowed
@@ -759,7 +778,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                  <label className="text-[9px] uppercase text-slate-500 font-bold tracking-wider ml-1">Source Input</label>
                                  <button 
                                     onClick={(e) => { e.stopPropagation(); handleInstanceToggle(instance.index, effectiveAllowed); }}
-                                    className={`p-0.5 rounded transition-colors ${effectiveAllowed ? 'text-purple-400 hover:text-purple-300' : 'text-slate-600 hover:text-slate-500'}`}
+                                    className={`p-0.5 rounded transition-colors ${effectiveAllowed ? 'text-purple-400 hover:text-purple-300 bg-purple-500/10' : 'text-slate-600 hover:text-slate-500'}`}
                                     title="Toggle Generative AI for this instance"
                                  >
                                      <Sparkles className="w-3 h-3" fill={effectiveAllowed ? "currentColor" : "none"} />

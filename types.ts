@@ -81,7 +81,7 @@ export interface LayoutStrategy {
   // Logic Gate Flags
   isExplicitIntent?: boolean;
   clearance?: boolean;
-  generationAllowed?: boolean; // New Flag: Master switch for generation
+  generationAllowed?: boolean; // Master switch for generation strategy
   // Visual Grounding
   sourceReference?: string; // Base64 pixel data of the source container
 }
@@ -108,7 +108,7 @@ export interface MappingContext {
   previewUrl?: string; 
   // Explicit Target Dimensions for deterministic rendering
   targetDimensions?: { w: number, h: number };
-  generationAllowed?: boolean; // New Flag: Propagated gate state
+  generationAllowed?: boolean; // Propagated gate state
 }
 
 export interface ValidationIssue {
@@ -149,19 +149,24 @@ export interface TransformedPayload {
   requiresGeneration?: boolean;
   previewUrl?: string;
   isConfirmed?: boolean;
-  isTransient?: boolean; // New Flag: Marks in-progress/unconfirmed generative states
-  isSynthesizing?: boolean; // New Flag: Indicates active generation (Double-Buffer Flush state)
+  isTransient?: boolean; // Marks in-progress/unconfirmed generative states
+  isSynthesizing?: boolean; // Indicates active generation (Double-Buffer Flush state)
   sourceReference?: string; // Carried over from Strategy for Export/Gen use
   history?: string[]; // History of preview URLs for navigation/undo
   activeHistoryIndex?: number; // Pointer for time-travel navigation
   latestDraftUrl?: string; // Holding pen for the Active Ghost when browsing history
   generationId?: number; // Timestamp of the specific generation to force React updates
-  generationAllowed?: boolean; // New Flag: Enforcement state
+  generationAllowed?: boolean; // New Flag: Per-instance enforcement state
 }
 
 export interface RemapperConfig {
   targetContainerName: string | null;
   strategy?: RemapStrategy;
+  generationAllowed?: boolean; // Global Toggle
+}
+
+export interface InstanceSettings {
+  generationAllowed?: boolean;
 }
 
 export interface ChatMessage {
@@ -192,6 +197,7 @@ export interface PSDNodeData {
   // Dynamic State Persistence
   channelCount?: number;
   instanceCount?: number;
+  instanceSettings?: Record<number, InstanceSettings>; // Per-Instance Persistence
   
   // Multi-Instance Analysis State
   analystInstances?: Record<number, AnalystInstanceState>;
