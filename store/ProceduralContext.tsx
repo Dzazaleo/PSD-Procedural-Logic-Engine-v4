@@ -26,7 +26,7 @@ interface ProceduralContextType extends ProceduralState {
   registerPsd: (nodeId: string, psd: Psd) => void;
   registerTemplate: (nodeId: string, template: TemplateMetadata) => void;
   registerResolved: (nodeId: string, handleId: string, context: MappingContext) => void;
-  registerPayload: (nodeId: string, handleId: string, payload: TransformedPayload) => void;
+  registerPayload: (nodeId: string, handleId: string, payload: TransformedPayload, masterOverride?: boolean) => void;
   updatePayload: (nodeId: string, handleId: string, partial: Partial<TransformedPayload>) => void; 
   registerAnalysis: (nodeId: string, handleId: string, strategy: LayoutStrategy) => void;
   updatePreview: (nodeId: string, handleId: string, url: string) => void;
@@ -236,14 +236,23 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     });
   }, []);
 
-  const registerPayload = useCallback((nodeId: string, handleId: string, payload: TransformedPayload) => {
+  const registerPayload = useCallback((nodeId: string, handleId: string, payload: TransformedPayload, masterOverride?: boolean) => {
     setPayloadRegistry(prev => {
       const nodeRecord = prev[nodeId] || {};
       const currentPayload = nodeRecord[handleId];
+      
+      let effectivePayload = { ...payload };
+
+      // Phase 4A: Cascaded Generation Blocking (Master Override)
+      // If the master gate is explicitly CLOSED (false), we enforce it immediately on the registry logic.
+      if (masterOverride === false) {
+          effectivePayload.generationAllowed = false;
+          // Note: setting generationAllowed=false triggers the cleanup logic inside reconcileTerminalState
+      }
 
       // APPLY RECONCILIATION MIDDLEWARE
       // This enforces logic gates, history, and state transitions
-      const reconciledPayload = reconcileTerminalState(payload, currentPayload);
+      const reconciledPayload = reconcileTerminalState(effectivePayload, currentPayload);
 
       // Deep equality check optimization
       if (currentPayload && JSON.stringify(currentPayload) === JSON.stringify(reconciledPayload)) {

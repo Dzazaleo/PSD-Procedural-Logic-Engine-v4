@@ -244,72 +244,78 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       };
   }, []);
 
+  // Sync Cleanup on Global Disable
+  useEffect(() => {
+    if (!globalGenerationAllowed) {
+        setConfirmations({});
+        setDisplayPreviews({});
+        setIsGeneratingPreview({});
+    }
+  }, [globalGenerationAllowed]);
+
   // --- ACTIONS ---
 
-  // 1. GLOBAL TOGGLE ACTION
-  const handleGlobalToggle = useCallback(() => {
-      const newState = !globalGenerationAllowed;
-      
-      setNodes(nds => nds.map(n => {
+  // 1. GLOBAL TOGGLE ACTION (MASTER SYNC)
+  // Maps over entire instanceSettings array to match master state (ON/OFF)
+  const toggleMasterGeneration = useCallback(() => {
+      setNodes((nds) => nds.map((n) => {
           if (n.id === id) {
+              const currentConfig = n.data.remapperConfig || { targetContainerName: null };
+              const currentGlobal = currentConfig.generationAllowed ?? true;
+              const newGlobal = !currentGlobal;
+              
+              // Master Sync: Force all instances to match the new global state
+              const count = n.data.instanceCount || 1;
+              const newInstanceSettings = { ...(n.data.instanceSettings || {}) };
+              
+              for (let i = 0; i < count; i++) {
+                  newInstanceSettings[i] = {
+                      ...(newInstanceSettings[i] || {}),
+                      generationAllowed: newGlobal
+                  };
+              }
+
               return {
                   ...n,
                   data: {
                       ...n.data,
                       remapperConfig: {
-                          ...(n.data.remapperConfig || { targetContainerName: null }),
-                          generationAllowed: newState
+                          ...currentConfig,
+                          generationAllowed: newGlobal
+                      },
+                      instanceSettings: newInstanceSettings
+                  }
+              };
+          }
+          return n;
+      }));
+  }, [id, setNodes]);
+
+  // 2. INSTANCE TOGGLE ACTION (ATOMIC)
+  // Immutably updates the specific instance setting via setNodes
+  const toggleInstanceGeneration = useCallback((index: number) => {
+      setNodes((nds) => nds.map((n) => {
+          if (n.id === id) {
+              const currentSettings = n.data.instanceSettings || {};
+              const currentInstanceSetting = currentSettings[index] || {};
+              const newAllowed = !(currentInstanceSetting.generationAllowed ?? true);
+
+              return {
+                  ...n,
+                  data: {
+                      ...n.data,
+                      instanceSettings: {
+                          ...currentSettings,
+                          [index]: {
+                              ...currentInstanceSetting,
+                              generationAllowed: newAllowed
+                          }
                       }
                   }
               };
           }
           return n;
       }));
-
-      // Destructive Reset
-      if (!newState) {
-          setConfirmations({});
-          setDisplayPreviews({});
-          setIsGeneratingPreview({});
-      }
-  }, [id, setNodes, globalGenerationAllowed]);
-
-  // 2. INSTANCE TOGGLE ACTION (PERSISTENT)
-  const handleInstanceToggle = useCallback((index: number, currentAllowed: boolean) => {
-      const newState = !currentAllowed;
-      
-      // Update Node Data (Persistence Source of Truth)
-      setNodes(nds => nds.map(node => {
-        if (node.id === id) {
-            const currentSettings = node.data.instanceSettings || {};
-            return {
-                ...node,
-                data: {
-                    ...node.data,
-                    instanceSettings: {
-                        ...currentSettings,
-                        [index]: { ...currentSettings[index], generationAllowed: newState }
-                    }
-                }
-            };
-        }
-        return node;
-      }));
-
-      // Destructive Reset Local State
-      if (!newState) {
-          setConfirmations(prev => {
-              const next = { ...prev };
-              delete next[index];
-              return next;
-          });
-          setDisplayPreviews(prev => {
-              const next = { ...prev };
-              delete next[index];
-              return next;
-          });
-          setIsGeneratingPreview(prev => ({...prev, [index]: false}));
-      }
   }, [id, setNodes]);
 
   // 3. CONFIRM ACTION
@@ -557,10 +563,10 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         // OR if the generation ID matches the current one (stable).
         // This avoids overwriting a fresh AI generation with a geometric calculation that lacks the ID.
         if (instance.payload && !isGeneratingPreview[instance.index]) {
-             registerPayload(id, `result-out-${instance.index}`, instance.payload);
+             registerPayload(id, `result-out-${instance.index}`, instance.payload, globalGenerationAllowed);
         }
     });
-  }, [instances, id, registerPayload, isGeneratingPreview]);
+  }, [instances, id, registerPayload, isGeneratingPreview, globalGenerationAllowed]);
 
   // OPTIMISTIC LOCK
   useEffect(() => {
@@ -726,8 +732,8 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
          </div>
          <div className="flex items-center space-x-2">
              <button 
-                onClick={(e) => { e.stopPropagation(); handleGlobalToggle(); }}
-                className={`p-1 rounded transition-colors ${globalGenerationAllowed ? 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/40' : 'bg-slate-700/50 text-slate-500 hover:bg-slate-700'}`}
+                onClick={(e) => { e.stopPropagation(); toggleMasterGeneration(); }}
+                className={`nodrag nopan p-1 rounded transition-colors ${globalGenerationAllowed ? 'bg-purple-500/20 text-purple-300 hover:bg-purple-500/40' : 'bg-slate-700/50 text-slate-500 hover:bg-slate-700'}`}
                 title={globalGenerationAllowed ? "Master Gate: AI Enabled" : "Master Gate: AI Disabled"}
              >
                  <Sparkles className="w-3.5 h-3.5" fill={globalGenerationAllowed ? "currentColor" : "none"} />
@@ -767,6 +773,9 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              
              const isEffectiveGenerating = !!isGeneratingPreview[instance.index] || !!storeIsSynthesizing;
 
+             // Local settings state from Node Data (for UI sync)
+             const localSetting = instanceSettings[instance.index]?.generationAllowed ?? true;
+
              return (
              <div key={instance.index} className="relative p-3 border-b border-slate-700/50 bg-slate-800 space-y-3 hover:bg-slate-700/20 transition-colors first:rounded-t-none">
                 
@@ -777,11 +786,11 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                              <div className="flex items-center space-x-1.5">
                                  <label className="text-[9px] uppercase text-slate-500 font-bold tracking-wider ml-1">Source Input</label>
                                  <button 
-                                    onClick={(e) => { e.stopPropagation(); handleInstanceToggle(instance.index, effectiveAllowed); }}
-                                    className={`p-0.5 rounded transition-colors ${effectiveAllowed ? 'text-purple-400 hover:text-purple-300 bg-purple-500/10' : 'text-slate-600 hover:text-slate-500'}`}
+                                    onClick={(e) => { e.stopPropagation(); toggleInstanceGeneration(instance.index); }}
+                                    className={`nodrag nopan p-0.5 rounded transition-colors ${localSetting ? 'text-purple-400 hover:text-purple-300 bg-purple-500/10' : 'text-slate-600 hover:text-slate-500'}`}
                                     title="Toggle Generative AI for this instance"
                                  >
-                                     <Sparkles className="w-3 h-3" fill={effectiveAllowed ? "currentColor" : "none"} />
+                                     <Sparkles className="w-3 h-3" fill={localSetting ? "currentColor" : "none"} />
                                  </button>
                              </div>
                              {instance.source.ready && <span className="text-[8px] text-blue-400 font-mono">LINKED</span>}
