@@ -27,6 +27,7 @@ interface ProceduralContextType extends ProceduralState {
   registerTemplate: (nodeId: string, template: TemplateMetadata) => void;
   registerResolved: (nodeId: string, handleId: string, context: MappingContext) => void;
   registerPayload: (nodeId: string, handleId: string, payload: TransformedPayload) => void;
+  updatePayload: (nodeId: string, handleId: string, partial: Partial<TransformedPayload>) => void; 
   registerAnalysis: (nodeId: string, handleId: string, strategy: LayoutStrategy) => void;
   updatePreview: (nodeId: string, handleId: string, url: string) => void;
   seekHistory: (nodeId: string, handleId: string, direction: number) => void; 
@@ -37,17 +38,69 @@ interface ProceduralContextType extends ProceduralState {
 const ProceduralContext = createContext<ProceduralContextType | null>(null);
 
 // --- HELPER: Reconcile Terminal State ---
+// Implements "Double-Buffer" Update Strategy + Stale Guard
 const reconcileTerminalState = (
     incomingPayload: TransformedPayload, 
     currentPayload: TransformedPayload | undefined
 ): TransformedPayload => {
-    
+
+    // GUARD: STALE UPDATE PROTECTION
+    // If the store has a newer generation ID than the incoming payload, ignore the incoming update.
+    // This prevents race conditions where a React Effect sends an old state after an async update has already landed.
+    if (currentPayload?.generationId && incomingPayload.generationId && incomingPayload.generationId < currentPayload.generationId) {
+        // Return current state, effectively dropping the stale incoming packet
+        return currentPayload;
+    }
+
+    // PHASE 1: FLUSH (Start Synthesis)
+    // If incoming payload marks start of synthesis, preserve current visuals but flag state.
+    if (incomingPayload.isSynthesizing) {
+        return {
+            ...(currentPayload || incomingPayload),
+            isSynthesizing: true,
+            // Carry over vital metadata even during flush to prevent layout shifts
+            sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
+            targetContainer: incomingPayload.targetContainer || currentPayload?.targetContainer || '',
+            metrics: incomingPayload.metrics || currentPayload?.metrics,
+            // Ensure we don't lose the current ID during flush
+            generationId: currentPayload?.generationId
+        };
+    }
+
+    // PHASE 2: FILL (Completion)
+    // Check if this is a fresh generation based on Unique ID.
+    const isNewGeneration = 
+        !!incomingPayload.generationId && 
+        (!currentPayload?.generationId || incomingPayload.generationId > currentPayload.generationId);
+
+    // Persist generation ID if not superseded by a new one
+    const effectiveGenerationId = isNewGeneration ? incomingPayload.generationId : currentPayload?.generationId;
+
+    // IMMEDIATE EFFECT RECONCILIATION:
+    if (isNewGeneration || (!currentPayload && incomingPayload.generationId)) {
+        // Carry over history from current if incoming is transient draft
+        const nextHistory = currentPayload?.history || [];
+        const nextActiveIndex = incomingPayload.isTransient 
+             ? nextHistory.length // Point to ghost
+             : (incomingPayload.activeHistoryIndex ?? nextHistory.length - 1);
+
+        return {
+            ...incomingPayload,
+            history: nextHistory,
+            activeHistoryIndex: nextActiveIndex,
+            // If it's a new generation, the previewUrl is the latest draft
+            latestDraftUrl: incomingPayload.isTransient ? incomingPayload.previewUrl : undefined,
+            isSynthesizing: false, 
+            generationId: effectiveGenerationId
+        };
+    }
+
     const existingHistory = currentPayload?.history || [];
     let nextHistory = existingHistory;
     let nextDraftUrl = currentPayload?.latestDraftUrl;
     let nextActiveIndex = currentPayload?.activeHistoryIndex;
     
-    // Carry over history pointer if not explicitly reset, but default to 'tip' logic if undefined
+    // Carry over history pointer if not explicitly reset
     if (nextActiveIndex === undefined) nextActiveIndex = existingHistory.length > 0 ? existingHistory.length - 1 : 0;
 
     const isIncomingTerminal = incomingPayload.isConfirmed && !incomingPayload.isTransient;
@@ -62,7 +115,9 @@ const reconcileTerminalState = (
             ...incomingPayload,
             history: nextHistory,
             activeHistoryIndex: nextActiveIndex,
-            latestDraftUrl: nextDraftUrl
+            latestDraftUrl: nextDraftUrl,
+            isSynthesizing: false,
+            generationId: effectiveGenerationId
         };
     }
     
@@ -95,7 +150,9 @@ const reconcileTerminalState = (
             activeHistoryIndex: nextActiveIndex,
             latestDraftUrl: nextDraftUrl,
             sourceReference: nextSourceReference, // Update reference for soft-lock refinement
-            isTransient: false // Explicit sanitation
+            isTransient: false, // Explicit sanitation
+            isSynthesizing: false,
+            generationId: effectiveGenerationId
         };
     }
     
@@ -104,7 +161,9 @@ const reconcileTerminalState = (
         ...incomingPayload,
         history: nextHistory,
         activeHistoryIndex: nextActiveIndex,
-        latestDraftUrl: nextDraftUrl
+        latestDraftUrl: nextDraftUrl,
+        isSynthesizing: currentPayload?.isSynthesizing,
+        generationId: effectiveGenerationId
     };
 };
 
@@ -169,7 +228,11 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
       // APPLY RECONCILIATION MIDDLEWARE
       const reconciledPayload = reconcileTerminalState(payload, currentPayload);
 
-      if (currentPayload === reconciledPayload) return prev;
+      // Deep equality check optimization
+      if (currentPayload && JSON.stringify(currentPayload) === JSON.stringify(reconciledPayload)) {
+          // If purely identical, skip update
+          return prev;
+      }
 
       // CHECK FOR NON-BILLABLE DRAFT REFRESH (Event Emission)
       if (currentPayload) {
@@ -192,6 +255,33 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
           }
       }
 
+      return { 
+        ...prev, 
+        [nodeId]: {
+            ...nodeRecord,
+            [handleId]: reconciledPayload
+        } 
+      };
+    });
+  }, []);
+
+  // NEW: Atomic Partial Update to prevent Stale Closures
+  const updatePayload = useCallback((nodeId: string, handleId: string, partial: Partial<TransformedPayload>) => {
+    setPayloadRegistry(prev => {
+      const nodeRecord = prev[nodeId] || {};
+      const currentPayload = nodeRecord[handleId];
+      
+      // Safety: Cannot update non-existent payload unless sufficient data provided (assumed handled upstream)
+      if (!currentPayload && !partial.sourceContainer) return prev; 
+
+      // Merge: State = Current + Partial
+      const mergedPayload: TransformedPayload = currentPayload 
+        ? { ...currentPayload, ...partial }
+        : (partial as TransformedPayload); 
+
+      // Reconcile
+      const reconciledPayload = reconcileTerminalState(mergedPayload, currentPayload);
+      
       if (currentPayload && JSON.stringify(currentPayload) === JSON.stringify(reconciledPayload)) return prev;
 
       return { 
@@ -306,6 +396,7 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     registerTemplate,
     registerResolved,
     registerPayload,
+    updatePayload, 
     registerAnalysis,
     updatePreview,
     seekHistory,
@@ -313,7 +404,7 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     triggerGlobalRefresh
   }), [
     psdRegistry, templateRegistry, resolvedRegistry, payloadRegistry, analysisRegistry, globalVersion,
-    registerPsd, registerTemplate, registerResolved, registerPayload, registerAnalysis, updatePreview, seekHistory,
+    registerPsd, registerTemplate, registerResolved, registerPayload, updatePayload, registerAnalysis, updatePreview, seekHistory,
     unregisterNode, triggerGlobalRefresh
   ]);
 

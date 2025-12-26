@@ -43,6 +43,7 @@ interface OverlayProps {
     sourceReference?: string;
     onImageLoad?: () => void; // Added for Optimistic UI Locking
     refinementPending?: boolean;
+    generationId?: number; // Added to force update on new generation
 }
 
 const GenerativePreviewOverlay = ({ 
@@ -59,7 +60,8 @@ const GenerativePreviewOverlay = ({
     targetDimensions,
     sourceReference,
     onImageLoad,
-    refinementPending
+    refinementPending,
+    generationId
 }: OverlayProps) => {
     // Dynamic Ratio Calculation
     const { w, h } = targetDimensions || { w: 1, h: 1 };
@@ -73,8 +75,13 @@ const GenerativePreviewOverlay = ({
     
     // Check if current view is the "Latest" (tip of the timeline)
     const isLatest = currentIndex === maxIndex;
-    // Check if timeline has navigable history
-    const hasHistory = maxIndex > 0;
+    // Check if timeline has navigable history (any history items OR a draft exists)
+    const hasHistory = history.length > 0 || hasDraft;
+
+    // Use generationId in effect to force a repaint if needed, though React should handle prop changes
+    useEffect(() => {
+        // This effect serves as a marker that the overlay responds to generation updates
+    }, [generationId]);
 
     return (
         <div className={`relative w-full mt-2 rounded-md overflow-hidden bg-slate-900/50 border transition-all duration-500 flex justify-center flex-col items-center ${isGenerating ? 'border-indigo-500/30' : 'border-purple-500/50'}`}>
@@ -109,6 +116,7 @@ const GenerativePreviewOverlay = ({
                         src={previewUrl} 
                         onLoad={onImageLoad}
                         alt="AI Ghost" 
+                        key={generationId} // Force remount on new generation for instant update
                         className={`w-full h-full object-cover transition-all duration-700 
                             ${isConfirmed 
                                 ? 'opacity-100 grayscale-0 mix-blend-normal' 
@@ -230,6 +238,12 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   // Track previous prompts to detect changes (In-Flight Logic)
   const lastPromptsRef = useRef<Record<number, string>>({});
 
+  // Refs for current payload logic (used for sync update)
+  const instancesRef = useRef<InstanceData[]>([]);
+
+  // Blob Revocation Tracking
+  const previousBlobsRef = useRef<Record<number, string>>({});
+
   // OPTIMISTIC UI STATE
   const [displayPreviews, setDisplayPreviews] = useState<Record<number, string>>({});
   const isTransitioningRef = useRef<Record<number, boolean>>({});
@@ -239,12 +253,22 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const nodes = useNodes();
   
   // Consume data from Store
-  const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, seekHistory, unregisterNode } = useProceduralStore();
+  const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, updatePayload, seekHistory, unregisterNode } = useProceduralStore();
 
   // Cleanup
   useEffect(() => {
     return () => unregisterNode(id);
   }, [id, unregisterNode]);
+
+  // Cleanup Revoked Blobs on Unmount
+  useEffect(() => {
+      const blobs = previousBlobsRef.current;
+      return () => {
+          Object.values(blobs).forEach(url => {
+              if (url && url.startsWith('blob:')) URL.revokeObjectURL(url);
+          });
+      };
+  }, []);
 
   // Handle Confirmation & Restoration
   // If `restoredUrl` is provided (from History Nav), we force it as current
@@ -442,6 +466,11 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                 transformedLayers.unshift(genLayer);
             }
             
+            // STATE RECOVERY:
+            // Fetch existing payload from store to preserve generation metadata (ID, History)
+            // This prevents the sync effect from overwriting fresh generations with stale structure data.
+            const storePayload = payloadRegistry[id]?.[`result-out-${i}`];
+
             payload = {
               status: status,
               sourceNodeId: sourceData.nodeId,
@@ -451,10 +480,18 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
               scaleFactor: scale,
               metrics: { source: { w: sourceRect.w, h: sourceRect.h }, target: { w: targetRect.w, h: targetRect.h } },
               requiresGeneration: requiresGeneration,
-              previewUrl: sourceData.previewUrl || previews[i],
+              // Prioritize Store Payload > Local Previews
+              previewUrl: storePayload?.previewUrl || previews[i] || sourceData.previewUrl,
               isConfirmed: isConfirmed,
               isTransient: !isConfirmed, 
-              sourceReference: sourceData.aiStrategy?.sourceReference
+              sourceReference: sourceData.aiStrategy?.sourceReference,
+              // METADATA PRESERVATION:
+              // Merge back key fields managed by the Store/Actions, not by this Calculator
+              generationId: storePayload?.generationId,
+              history: storePayload?.history,
+              activeHistoryIndex: storePayload?.activeHistoryIndex,
+              latestDraftUrl: storePayload?.latestDraftUrl,
+              isSynthesizing: storePayload?.isSynthesizing
             };
         }
 
@@ -468,17 +505,22 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     }
 
     return result;
-  }, [instanceCount, edges, id, resolvedRegistry, templateRegistry, nodes, confirmations, previews]);
+  }, [instanceCount, edges, id, resolvedRegistry, templateRegistry, nodes, confirmations, previews, payloadRegistry]);
 
+  // Keep Ref updated for synchronous access in async functions
+  useEffect(() => {
+      instancesRef.current = instances;
+  }, [instances]);
 
-  // Sync Payloads to Store
+  // Sync Payloads to Store (Standard update for non-generative changes)
   useEffect(() => {
     instances.forEach(instance => {
-        if (instance.payload) {
+        // Only register if we aren't currently generating for this instance to avoid race conditions
+        if (instance.payload && !isGeneratingPreview[instance.index]) {
             registerPayload(id, `result-out-${instance.index}`, instance.payload);
         }
     });
-  }, [instances, id, registerPayload]);
+  }, [instances, id, registerPayload, isGeneratingPreview]);
 
   // GHOST FLUSHING
   useEffect(() => {
@@ -561,6 +603,9 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              const generateDraft = async () => {
                  setIsGeneratingPreview(prev => ({...prev, [idx]: true}));
                  
+                 // PHASE 1: FLUSH
+                 updatePayload(id, `result-out-${idx}`, { isSynthesizing: true });
+
                  try {
                      const apiKey = process.env.API_KEY;
                      if (!apiKey) return;
@@ -588,11 +633,30 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                      
                      if (base64Data) {
                          const url = `data:image/png;base64,${base64Data}`;
-                         setPreviews(prev => ({...prev, [idx]: url}));
+                         
+                         // PHASE 2: FILL
+                         // Removed local setPreviews() to rely strictly on Store round-trip for sync safety
+                         
+                         // Capture the previous blob for revocation *after* the DOM updates
+                         const previousUrl = previousBlobsRef.current[idx];
+                         if (previousUrl && previousUrl !== url && previousUrl.startsWith('blob:')) {
+                             setTimeout(() => URL.revokeObjectURL(previousUrl), 2000);
+                         }
+                         previousBlobsRef.current[idx] = url;
+
+                         // Dispatch new terminal state to store via updatePayload
+                         updatePayload(id, `result-out-${idx}`, {
+                             previewUrl: url,
+                             isTransient: true,
+                             isSynthesizing: false,
+                             generationId: Date.now() // Atomic Stamp for Reconciliation
+                         });
                      }
 
                  } catch (e) {
                      console.error("Draft Generation Failed", e);
+                     // Error recovery: Reset synthesis flag
+                     updatePayload(id, `result-out-${idx}`, { isSynthesizing: false });
                  } finally {
                      setIsGeneratingPreview(prev => ({...prev, [idx]: false}));
                  }
@@ -600,7 +664,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              generateDraft();
         }
     });
-  }, [instances, previews, isGeneratingPreview]);
+  }, [instances, previews, isGeneratingPreview, id, updatePayload]);
 
 
   const addInstance = useCallback(() => {
@@ -643,12 +707,16 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              const latestDraft = storePayload?.latestDraftUrl;
              // The storePayload also holds the canonical confirmed URL which might differ from local calculation if navigation occurred
              const persistedPreview = storePayload?.previewUrl;
+             const storeIsSynthesizing = storePayload?.isSynthesizing;
 
              // Prioritize Store Payload (if valid) > Optimistic Display > Instance Local > Draft
              const effectivePreview = persistedPreview || displayPreviews[instance.index] || instance.payload?.previewUrl || previews[instance.index];
 
              // Pass the CONFIRMED URL for the next iteration step (Soft-Lock Refinement)
              const iterativeSource = storePayload?.sourceReference || instance.payload?.sourceReference;
+             
+             // Consolidate synthesis state
+             const isEffectiveGenerating = !!isGeneratingPreview[instance.index] || !!storeIsSynthesizing;
 
              return (
              <div key={instance.index} className="relative p-3 border-b border-slate-700/50 bg-slate-800 space-y-3 hover:bg-slate-700/20 transition-colors first:rounded-t-none">
@@ -752,7 +820,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                        history={history}
                                        activeHistoryIndex={activeIndex}
                                        hasDraft={!!latestDraft}
-                                       isGenerating={!!isGeneratingPreview[instance.index]}
+                                       isGenerating={isEffectiveGenerating}
                                        scale={instance.payload.scaleFactor}
                                        onConfirm={(url) => handleConfirmGeneration(instance.index, instance.source.aiStrategy?.generativePrompt || '', url)}
                                        onSeek={(direction) => seekHistory(id, `result-out-${instance.index}`, direction)}
@@ -762,6 +830,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                        sourceReference={iterativeSource}
                                        onImageLoad={() => handleImageLoad(instance.index)}
                                        refinementPending={refinementPending}
+                                       generationId={storePayload?.generationId}
                                    />
                                </div>
                            )}

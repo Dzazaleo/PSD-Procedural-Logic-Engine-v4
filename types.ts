@@ -148,10 +148,12 @@ export interface TransformedPayload {
   previewUrl?: string;
   isConfirmed?: boolean;
   isTransient?: boolean; // New Flag: Marks in-progress/unconfirmed generative states
+  isSynthesizing?: boolean; // New Flag: Indicates active generation (Double-Buffer Flush state)
   sourceReference?: string; // Carried over from Strategy for Export/Gen use
   history?: string[]; // History of preview URLs for navigation/undo
   activeHistoryIndex?: number; // Pointer for time-travel navigation
   latestDraftUrl?: string; // Holding pen for the Active Ghost when browsing history
+  generationId?: number; // Timestamp of the specific generation to force React updates
 }
 
 export interface RemapperConfig {
