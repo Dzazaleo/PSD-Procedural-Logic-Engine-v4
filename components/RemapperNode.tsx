@@ -3,7 +3,7 @@ import { Handle, Position, NodeProps, useEdges, useReactFlow, useNodes } from 'r
 import { PSDNodeData, SerializableLayer, TransformedPayload, TransformedLayer, MAX_BOUNDARY_VIOLATION_PERCENT, LayoutStrategy } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { GoogleGenAI } from "@google/genai";
-import { ChevronLeft, ChevronRight, History as HistoryIcon, Check, RefreshCw, RotateCcw } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Check } from 'lucide-react';
 
 interface InstanceData {
   index: number;
@@ -30,6 +30,7 @@ interface InstanceData {
 // --- SUB-COMPONENT: Generative Preview Overlay ---
 interface OverlayProps {
     previewUrl?: string | null;
+    canonicalUrl?: string | null; // The URL currently locked in the store
     history?: string[];
     activeHistoryIndex?: number;
     hasDraft?: boolean;
@@ -37,30 +38,25 @@ interface OverlayProps {
     scale: number;
     onConfirm: (url?: string) => void;
     onSeek: (direction: number) => void;
-    canConfirm: boolean;
-    isConfirmed: boolean;
+    isStoreConfirmed: boolean; // The confirmation state of the store payload
     targetDimensions?: { w: number, h: number };
     sourceReference?: string;
     onImageLoad?: () => void;
-    refinementPending?: boolean;
     generationId?: number; 
 }
 
 const GenerativePreviewOverlay = ({ 
     previewUrl, 
+    canonicalUrl,
     history = [],
     activeHistoryIndex,
-    hasDraft,
     isGenerating,
-    scale,
     onConfirm,
     onSeek,
-    canConfirm,
-    isConfirmed,
+    isStoreConfirmed,
     targetDimensions,
     sourceReference,
     onImageLoad,
-    refinementPending,
     generationId
 }: OverlayProps) => {
     const { w, h } = targetDimensions || { w: 1, h: 1 };
@@ -73,9 +69,15 @@ const GenerativePreviewOverlay = ({
     const isLatest = currentIndex === maxIndex;
     const hasHistory = history.length > 0;
 
-    useEffect(() => {
-        // Force repaint trigger
-    }, [generationId]);
+    // STRICT CONFIRMATION LOGIC:
+    // A view is confirmed ONLY if it matches the store's canonical URL AND the store is confirmed.
+    // This handles history navigation: if you look at an old image, it is NOT confirmed, even if the store is.
+    const isCurrentViewConfirmed = !!previewUrl && !!canonicalUrl && previewUrl === canonicalUrl && isStoreConfirmed;
+
+    // Button Visibility:
+    // Show 'Confirm' if the current view is NOT the confirmed one.
+    // This allows "Restoring" history (by confirming an old URL) or "Confirming" a new draft.
+    const showConfirmButton = !!previewUrl && !isCurrentViewConfirmed && !isGenerating;
 
     return (
         <div className={`relative w-full mt-2 rounded-md overflow-hidden bg-slate-900/50 border transition-all duration-500 flex justify-center flex-col items-center ${isGenerating ? 'border-indigo-500/30' : 'border-purple-500/50'}`}>
@@ -107,9 +109,9 @@ const GenerativePreviewOverlay = ({
                         src={previewUrl} 
                         onLoad={onImageLoad}
                         alt="AI Ghost" 
-                        key={generationId} 
+                        key={generationId} // Force remount on new generation for instant update
                         className={`w-full h-full object-cover transition-all duration-700 
-                            ${isConfirmed 
+                            ${isCurrentViewConfirmed 
                                 ? 'opacity-100 grayscale-0 mix-blend-normal' 
                                 : 'opacity-100 grayscale-0 mix-blend-normal'
                             }`}
@@ -128,36 +130,29 @@ const GenerativePreviewOverlay = ({
                      </div>
                  )}
 
-                 {previewUrl && !isGenerating && (
-                     <div className={`absolute top-2 right-2 z-40 flex flex-col items-end transition-opacity duration-300 ${!canConfirm && isLatest && isConfirmed ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
-                        {(canConfirm || !isLatest || !isConfirmed) && (
-                             <button 
-                                onClick={(e) => { e.stopPropagation(); onConfirm(previewUrl); }}
-                                className="bg-indigo-600/90 hover:bg-indigo-500 text-white p-1.5 rounded shadow-[0_4px_10px_rgba(0,0,0,0.3)] border border-white/20 transform hover:scale-105 active:scale-95 transition-all flex items-center space-x-1.5 backdrop-blur-[2px]"
-                                title="Commit this generation to the pipeline"
-                             >
-                                <span className="text-[9px] font-bold uppercase tracking-wider leading-none">
-                                    {!isLatest ? 'Restore' : refinementPending ? 'Update' : 'Confirm'}
-                                </span>
-                                {!isLatest ? (
-                                    <RotateCcw className="w-3 h-3 text-indigo-100" />
-                                ) : refinementPending ? (
-                                    <RefreshCw className="w-3 h-3 text-indigo-100" />
-                                ) : (
-                                    <Check className="w-3 h-3 text-emerald-300" strokeWidth={3} />
-                                )}
-                             </button>
-                        )}
+                 {/* ACTION UTILITY BAR: Standardized Confirmation */}
+                 {showConfirmButton && (
+                     <div className="absolute top-2 right-2 z-40 flex flex-col items-end transition-opacity duration-300 opacity-100">
+                         <button 
+                            onClick={(e) => { e.stopPropagation(); onConfirm(previewUrl!); }}
+                            className="bg-indigo-600/90 hover:bg-indigo-500 text-white p-1.5 rounded shadow-[0_4px_10px_rgba(0,0,0,0.3)] border border-white/20 transform hover:scale-105 active:scale-95 transition-all flex items-center space-x-1.5 backdrop-blur-[2px]"
+                            title={isLatest ? "Commit this draft" : "Restore this version"}
+                         >
+                            <span className="text-[9px] font-bold uppercase tracking-wider leading-none">
+                                Confirm
+                            </span>
+                            <Check className="w-3 h-3 text-emerald-300" strokeWidth={3} />
+                         </button>
                      </div>
                  )}
 
                  <div className="absolute bottom-2 left-2 z-20 flex items-center space-x-2 pointer-events-none">
                      <span className={`text-[8px] px-1.5 py-0.5 rounded border backdrop-blur-sm shadow-[0_0_8px_rgba(0,0,0,0.5)]
-                        ${isConfirmed && isLatest
+                        ${isCurrentViewConfirmed
                             ? 'bg-emerald-900/80 text-emerald-200 border-emerald-500/50' 
                             : 'bg-purple-900/80 text-purple-200 border-purple-500/50'
                         }`}>
-                         {isConfirmed && isLatest ? 'CONFIRMED' : !isLatest ? `HISTORY ${currentIndex + 1}/${maxIndex + 1}` : 'PREVIEW'}
+                         {isCurrentViewConfirmed ? 'CONFIRMED' : !isLatest ? `HISTORY ${currentIndex + 1}/${maxIndex + 1}` : 'PREVIEW'}
                      </span>
                      {isGenerating && (
                          <span className="flex h-1.5 w-1.5 relative">
@@ -244,25 +239,25 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       };
   }, []);
 
-  // EVENT: Confirm / Restore
-  const handleConfirmGeneration = (index: number, prompt: string, restoredUrl?: string) => {
+  // EVENT: Confirm / Restore / Promote
+  const handleConfirmGeneration = useCallback((index: number, prompt: string, confirmedUrl?: string) => {
+      if (!confirmedUrl) return;
+
+      // Lock the prompt that generated this specific image to detect future refinements
       setConfirmations(prev => ({ ...prev, [index]: prompt }));
       
-      const payloadUpdate: Partial<TransformedPayload> = {
+      // EXCLUSIVE PROMOTION LOGIC:
+      // 1. Set the confirmUrl as the new 'previewUrl' (Source of Truth)
+      // 2. Mark isConfirmed: true (Allow Export)
+      // 3. Update sourceReference (Visual Grounding for next iter)
+      updatePayload(id, `result-out-${index}`, {
+          previewUrl: confirmedUrl,
           isConfirmed: true,
           isTransient: false,
-          generationId: Date.now() // Force a "Commit" event in the store
-      };
-
-      // If restoring from history, explicitly promote the restored URL to current
-      if (restoredUrl) {
-          payloadUpdate.previewUrl = restoredUrl;
-          // Set source reference to this validated generation for future refinements
-          payloadUpdate.sourceReference = restoredUrl; 
-      }
-      
-      updatePayload(id, `result-out-${index}`, payloadUpdate);
-  };
+          sourceReference: confirmedUrl,
+          generationId: Date.now() // Force refresh
+      });
+  }, [id, updatePayload]);
 
   const handleImageLoad = useCallback((index: number) => {
       isTransitioningRef.current[index] = false;
@@ -526,7 +521,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     });
   }, [instances, displayPreviews, payloadRegistry, id]);
 
-  // LAZY SYNTHESIS & MULTI-MODAL GROUNDING
+  // LAZY SYNTHESIS & MULTI-MODAL GROUNDING & AUTOMATED RESET
   useEffect(() => {
     instances.forEach(instance => {
         const idx = instance.index;
@@ -544,15 +539,22 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
 
         // GEOMETRIC RESET: If strategy changed to geometric, clear previews
         if (strategy?.method === 'GEOMETRIC') {
-             if (hasPreview) {
+             if (hasPreview || storePayload?.isConfirmed) {
                  updatePayload(id, `result-out-${idx}`, { previewUrl: undefined, isConfirmed: false, isTransient: false });
              }
              return;
         }
 
-        // REFINEMENT RESET: If prompt changed but we are confirmed, un-confirm to allow new draft
-        if (promptChanged && storePayload?.isConfirmed) {
+        // AUTOMATED REFINEMENT RESET
+        // If the upstream prompt differs from what we locked in confirmations, we must revoke confirmation.
+        // This forces re-verification of the new design.
+        const lockedPrompt = confirmations[idx];
+        const isRefinementDetected = !!currentPrompt && !!lockedPrompt && currentPrompt !== lockedPrompt;
+
+        if (isRefinementDetected && storePayload?.isConfirmed) {
+             console.log(`[Remapper] Refinement detected for #${idx}. Revoking confirmation.`);
              updatePayload(id, `result-out-${idx}`, { isConfirmed: false });
+             // We do NOT return here, because we might need to trigger a new draft below
         }
 
         if (promptChanged || needsInitialPreview) {
@@ -626,7 +628,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              generateDraft();
         }
     });
-  }, [instances, isGeneratingPreview, id, updatePayload, payloadRegistry]);
+  }, [instances, isGeneratingPreview, id, updatePayload, payloadRegistry, confirmations]);
 
 
   const addInstance = useCallback(() => {
@@ -670,6 +672,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              // The storePayload also holds the canonical confirmed URL which might differ from local calculation if navigation occurred
              const persistedPreview = storePayload?.previewUrl;
              const storeIsSynthesizing = storePayload?.isSynthesizing;
+             const storeConfirmed = storePayload?.isConfirmed;
 
              // Prioritize Store Payload (if valid) > Optimistic Display > Instance Local > Draft
              const effectivePreview = persistedPreview || displayPreviews[instance.index] || instance.payload?.previewUrl;
@@ -779,6 +782,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                    
                                    <GenerativePreviewOverlay 
                                        previewUrl={effectivePreview}
+                                       canonicalUrl={persistedPreview}
                                        history={history}
                                        activeHistoryIndex={activeIndex}
                                        hasDraft={!!latestDraft}
@@ -786,12 +790,10 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                        scale={instance.payload.scaleFactor}
                                        onConfirm={(url) => handleConfirmGeneration(instance.index, instance.source.aiStrategy?.generativePrompt || '', url)}
                                        onSeek={(direction) => seekHistory(id, `result-out-${instance.index}`, direction)}
-                                       canConfirm={isAwaiting || refinementPending}
-                                       isConfirmed={isConfirmed}
+                                       isStoreConfirmed={!!storeConfirmed}
                                        targetDimensions={instance.source.targetDimensions || instance.target.bounds}
                                        sourceReference={iterativeSource}
                                        onImageLoad={() => handleImageLoad(instance.index)}
-                                       refinementPending={refinementPending}
                                        generationId={storePayload?.generationId}
                                    />
                                </div>
