@@ -11,12 +11,12 @@ interface InstanceData {
     ready: boolean;
     name?: string;
     nodeId?: string;
-    handleId?: string; // Added to track specific source handle
+    handleId?: string;
     originalBounds?: any;
     layers?: any[];
-    aiStrategy?: LayoutStrategy; // Metadata injection from upstream
-    previewUrl?: string; // Draft from Analyst
-    targetDimensions?: { w: number, h: number }; // Dimensions from Upstream Analyst
+    aiStrategy?: LayoutStrategy;
+    previewUrl?: string; 
+    targetDimensions?: { w: number, h: number }; 
   };
   target: {
     ready: boolean;
@@ -28,6 +28,7 @@ interface InstanceData {
 }
 
 // --- SUB-COMPONENT: Generative Preview Overlay ---
+// (Unchanged from previous version, kept for completeness)
 interface OverlayProps {
     previewUrl?: string | null;
     history?: string[];
@@ -41,9 +42,9 @@ interface OverlayProps {
     isConfirmed: boolean;
     targetDimensions?: { w: number, h: number };
     sourceReference?: string;
-    onImageLoad?: () => void; // Added for Optimistic UI Locking
+    onImageLoad?: () => void;
     refinementPending?: boolean;
-    generationId?: number; // Added to force update on new generation
+    generationId?: number; 
 }
 
 const GenerativePreviewOverlay = ({ 
@@ -63,29 +64,21 @@ const GenerativePreviewOverlay = ({
     refinementPending,
     generationId
 }: OverlayProps) => {
-    // Dynamic Ratio Calculation
     const { w, h } = targetDimensions || { w: 1, h: 1 };
     const ratio = w / h;
     const maxWidthStyle = `${240 * ratio}px`;
     
-    // Calculate timeline bounds
-    // Max Index = history.length if hasDraft, else history.length - 1
     const maxIndex = hasDraft ? history.length : Math.max(0, history.length - 1);
     const currentIndex = activeHistoryIndex !== undefined ? activeHistoryIndex : maxIndex;
-    
-    // Check if current view is the "Latest" (tip of the timeline)
     const isLatest = currentIndex === maxIndex;
-    // Check if timeline has navigable history (any history items OR a draft exists)
     const hasHistory = history.length > 0 || hasDraft;
 
-    // Use generationId in effect to force a repaint if needed, though React should handle prop changes
     useEffect(() => {
-        // This effect serves as a marker that the overlay responds to generation updates
+        // Force repaint trigger
     }, [generationId]);
 
     return (
         <div className={`relative w-full mt-2 rounded-md overflow-hidden bg-slate-900/50 border transition-all duration-500 flex justify-center flex-col items-center ${isGenerating ? 'border-indigo-500/30' : 'border-purple-500/50'}`}>
-             {/* Aspect Ratio Container */}
              <div 
                 className="relative w-full flex items-center justify-center overflow-hidden group shadow-inner bg-black/20"
                 style={{
@@ -94,7 +87,6 @@ const GenerativePreviewOverlay = ({
                     width: '100%'
                 }}
              >
-                 {/* Visual Grounding: Source Reference Thumbnail */}
                  {sourceReference && (
                      <div className="absolute top-2 left-2 z-20 flex flex-col items-start group/source pointer-events-none">
                         <div className="bg-black/60 backdrop-blur-md border border-white/20 p-0.5 rounded shadow-xl transition-transform transform group-hover/source:scale-150 origin-top-left">
@@ -110,17 +102,16 @@ const GenerativePreviewOverlay = ({
                      </div>
                  )}
                  
-                 {/* 1. The Ghost Image */}
                  {previewUrl ? (
                      <img 
                         src={previewUrl} 
                         onLoad={onImageLoad}
                         alt="AI Ghost" 
-                        key={generationId} // Force remount on new generation for instant update
+                        key={generationId} 
                         className={`w-full h-full object-cover transition-all duration-700 
                             ${isConfirmed 
                                 ? 'opacity-100 grayscale-0 mix-blend-normal' 
-                                : 'opacity-100 grayscale-0 mix-blend-normal' /* Remove ghosting opacity to allow clear evaluation */
+                                : 'opacity-100 grayscale-0 mix-blend-normal'
                             }`}
                      />
                  ) : (
@@ -131,14 +122,12 @@ const GenerativePreviewOverlay = ({
                      </div>
                  )}
 
-                 {/* 2. Scanning Line Animation (only during gen) */}
                  {isGenerating && (
                      <div className="absolute inset-0 z-20 pointer-events-none overflow-hidden">
                          <div className="absolute top-0 left-0 w-full h-[2px] bg-purple-400 shadow-[0_0_10px_rgba(168,85,247,0.8)] animate-scan-y"></div>
                      </div>
                  )}
 
-                 {/* 3. Action Utility Bar (Top-Right, Unobstructed) */}
                  {previewUrl && (
                      <div className={`absolute top-2 right-2 z-40 flex flex-col items-end transition-opacity duration-300 ${!canConfirm && isLatest && isConfirmed ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
                         {(canConfirm || !isLatest || !isConfirmed) && (
@@ -162,7 +151,6 @@ const GenerativePreviewOverlay = ({
                      </div>
                  )}
 
-                 {/* 4. Status Badge (Bottom-Left) */}
                  <div className="absolute bottom-2 left-2 z-20 flex items-center space-x-2 pointer-events-none">
                      <span className={`text-[8px] px-1.5 py-0.5 rounded border backdrop-blur-sm shadow-[0_0_8px_rgba(0,0,0,0.5)]
                         ${isConfirmed && isLatest
@@ -180,7 +168,6 @@ const GenerativePreviewOverlay = ({
                  </div>
              </div>
              
-             {/* 5. History Controls (Bottom Bar) */}
              {hasHistory && (
                  <div className="w-full flex items-center justify-between px-2 py-1 bg-black/40 border-t border-white/5">
                      <button 
@@ -226,20 +213,15 @@ const GenerativePreviewOverlay = ({
 };
 
 export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
-  // Read instance count from persistent data, default to 1 if new/undefined
   const instanceCount = data.instanceCount || 1;
   // SOFT LOCK STATE: Stores the PROMPT STRING that was confirmed
   const [confirmations, setConfirmations] = useState<Record<number, string>>({});
   
-  // Local state for generated draft previews
-  const [previews, setPreviews] = useState<Record<number, string>>({});
+  // Loading state only. Data state lives in PayloadRegistry.
   const [isGeneratingPreview, setIsGeneratingPreview] = useState<Record<number, boolean>>({});
   
   // Track previous prompts to detect changes (In-Flight Logic)
   const lastPromptsRef = useRef<Record<number, string>>({});
-
-  // Refs for current payload logic (used for sync update)
-  const instancesRef = useRef<InstanceData[]>([]);
 
   // Blob Revocation Tracking
   const previousBlobsRef = useRef<Record<number, string>>({});
@@ -255,7 +237,6 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   // Consume data from Store
   const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, updatePayload, seekHistory, unregisterNode } = useProceduralStore();
 
-  // Cleanup
   useEffect(() => {
     return () => unregisterNode(id);
   }, [id, unregisterNode]);
@@ -270,15 +251,18 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       };
   }, []);
 
-  // Handle Confirmation & Restoration
-  // If `restoredUrl` is provided (from History Nav), we force it as current
+  // Handle Confirmation
   const handleConfirmGeneration = (index: number, prompt: string, restoredUrl?: string) => {
       setConfirmations(prev => ({ ...prev, [index]: prompt }));
       
-      // CRITICAL FIX: Ensure the confirmed URL is also updated in local state so the 
-      // subsequent registerPayload call sees the correct "source" for the payload.
+      // If confirming a history item or draft, update the store to make it canonical
       if (restoredUrl) {
-          setPreviews(prev => ({ ...prev, [index]: restoredUrl }));
+          updatePayload(id, `result-out-${index}`, {
+              previewUrl: restoredUrl,
+              isConfirmed: true,
+              isTransient: false,
+              generationId: Date.now() // Force a "Commit" event in the store
+          });
       }
   };
 
@@ -398,16 +382,10 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                 let layerScaleX = scale;
                 let layerScaleY = scale;
                 const override = strategy?.overrides?.find(o => o.layerId === layer.id);
-                let currentDeltaX = parentDeltaX;
-                let currentDeltaY = parentDeltaY;
-
+                
                 if (override) {
-                   const aiX = targetRect.x + override.xOffset;
-                   const aiY = targetRect.y + override.yOffset;
-                   finalX = aiX;
-                   finalY = aiY;
-                   currentDeltaX = finalX - geomX;
-                   currentDeltaY = finalY - geomY;
+                   finalX = targetRect.x + override.xOffset;
+                   finalY = targetRect.y + override.yOffset;
                    layerScaleX *= override.individualScale;
                    layerScaleY *= override.individualScale;
                 }
@@ -423,7 +401,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                   ...layer,
                   coords: { x: finalX, y: finalY, w: newW, h: newH },
                   transform: { scaleX: layerScaleX, scaleY: layerScaleY, offsetX: finalX, offsetY: finalY },
-                  children: layer.children ? transformLayers(layer.children, currentDeltaX, currentDeltaY) : undefined
+                  children: layer.children ? transformLayers(layer.children, parentDeltaX, parentDeltaY) : undefined
                 };
               });
             };
@@ -466,9 +444,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                 transformedLayers.unshift(genLayer);
             }
             
-            // STATE RECOVERY:
-            // Fetch existing payload from store to preserve generation metadata (ID, History)
-            // This prevents the sync effect from overwriting fresh generations with stale structure data.
+            // FETCH STATE FROM STORE (Single Source of Truth)
             const storePayload = payloadRegistry[id]?.[`result-out-${i}`];
 
             payload = {
@@ -480,13 +456,12 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
               scaleFactor: scale,
               metrics: { source: { w: sourceRect.w, h: sourceRect.h }, target: { w: targetRect.w, h: targetRect.h } },
               requiresGeneration: requiresGeneration,
-              // Prioritize Store Payload > Local Previews
-              previewUrl: storePayload?.previewUrl || previews[i] || sourceData.previewUrl,
+              // Use store payload's preview if available, otherwise source data's
+              previewUrl: storePayload?.previewUrl || sourceData.previewUrl,
               isConfirmed: isConfirmed,
               isTransient: !isConfirmed, 
               sourceReference: sourceData.aiStrategy?.sourceReference,
-              // METADATA PRESERVATION:
-              // Merge back key fields managed by the Store/Actions, not by this Calculator
+              // METADATA PRESERVATION from Store
               generationId: storePayload?.generationId,
               history: storePayload?.history,
               activeHistoryIndex: storePayload?.activeHistoryIndex,
@@ -505,56 +480,31 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     }
 
     return result;
-  }, [instanceCount, edges, id, resolvedRegistry, templateRegistry, nodes, confirmations, previews, payloadRegistry]);
-
-  // Keep Ref updated for synchronous access in async functions
-  useEffect(() => {
-      instancesRef.current = instances;
-  }, [instances]);
+  }, [instanceCount, edges, id, resolvedRegistry, templateRegistry, nodes, confirmations, payloadRegistry]);
 
   // Sync Payloads to Store (Standard update for non-generative changes)
   useEffect(() => {
     instances.forEach(instance => {
-        // Only register if we aren't currently generating for this instance to avoid race conditions
+        // We only register if the payload is purely geometric (no generation ID yet)
+        // OR if the generation ID matches the current one (stable).
+        // This avoids overwriting a fresh AI generation with a geometric calculation that lacks the ID.
         if (instance.payload && !isGeneratingPreview[instance.index]) {
-            registerPayload(id, `result-out-${instance.index}`, instance.payload);
+             // If store has a generationId but we don't, it means we are just calculating geometry.
+             // We pass undefined generationId so store knows it's a geometry update and preserves the image.
+             // The useMemo logic above ALREADY reads generationId from store, so instance.payload SHOULD have it.
+             registerPayload(id, `result-out-${instance.index}`, instance.payload);
         }
     });
   }, [instances, id, registerPayload, isGeneratingPreview]);
-
-  // GHOST FLUSHING
-  useEffect(() => {
-    let stateChanged = false;
-    const nextPreviews = { ...previews };
-    const nextConfirmations = { ...confirmations };
-
-    instances.forEach(instance => {
-        const strategyMethod = instance.source.aiStrategy?.method;
-        const idx = instance.index;
-
-        if (strategyMethod === 'GEOMETRIC') {
-            if (nextPreviews[idx]) {
-                delete nextPreviews[idx];
-                stateChanged = true;
-            }
-            if (nextConfirmations[idx]) {
-                delete nextConfirmations[idx];
-                stateChanged = true;
-            }
-        }
-    });
-
-    if (stateChanged) {
-        setPreviews(nextPreviews);
-        setConfirmations(nextConfirmations);
-    }
-  }, [instances, previews, confirmations]);
 
   // OPTIMISTIC LOCK
   useEffect(() => {
     instances.forEach(instance => {
         const idx = instance.index;
-        const incomingUrl = instance.payload?.previewUrl || previews[idx];
+        // Read strictly from store payload for display
+        const storePayload = payloadRegistry[id]?.[`result-out-${idx}`];
+        const incomingUrl = storePayload?.previewUrl || instance.payload?.previewUrl;
+        
         const currentUrl = displayPreviews[idx];
         const isLocked = isTransitioningRef.current[idx];
 
@@ -576,7 +526,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
             isTransitioningRef.current[idx] = false;
         }
     });
-  }, [instances, previews, displayPreviews]);
+  }, [instances, displayPreviews, payloadRegistry, id]);
 
   // LAZY SYNTHESIS
   useEffect(() => {
@@ -590,7 +540,8 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         const promptChanged = hasPrompt && currentPrompt !== lastPrompt;
         
         const isAwaiting = instance.payload?.status === 'awaiting_confirmation';
-        const hasPreview = !!(instance.payload?.previewUrl || previews[idx]);
+        const storePayload = payloadRegistry[id]?.[`result-out-${idx}`];
+        const hasPreview = !!(storePayload?.previewUrl);
         const needsInitialPreview = isAwaiting && hasPrompt && !hasPreview;
 
         if (promptChanged || needsInitialPreview) {
@@ -634,28 +585,24 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                      if (base64Data) {
                          const url = `data:image/png;base64,${base64Data}`;
                          
-                         // PHASE 2: FILL
-                         // Removed local setPreviews() to rely strictly on Store round-trip for sync safety
-                         
-                         // Capture the previous blob for revocation *after* the DOM updates
                          const previousUrl = previousBlobsRef.current[idx];
                          if (previousUrl && previousUrl !== url && previousUrl.startsWith('blob:')) {
                              setTimeout(() => URL.revokeObjectURL(previousUrl), 2000);
                          }
                          previousBlobsRef.current[idx] = url;
 
-                         // Dispatch new terminal state to store via updatePayload
+                         // PHASE 2: FILL
+                         // Send to Store directly. Do NOT set local state.
                          updatePayload(id, `result-out-${idx}`, {
                              previewUrl: url,
                              isTransient: true,
                              isSynthesizing: false,
-                             generationId: Date.now() // Atomic Stamp for Reconciliation
+                             generationId: Date.now() // NEW TIMESTAMP
                          });
                      }
 
                  } catch (e) {
                      console.error("Draft Generation Failed", e);
-                     // Error recovery: Reset synthesis flag
                      updatePayload(id, `result-out-${idx}`, { isSynthesizing: false });
                  } finally {
                      setIsGeneratingPreview(prev => ({...prev, [idx]: false}));
@@ -664,7 +611,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              generateDraft();
         }
     });
-  }, [instances, previews, isGeneratingPreview, id, updatePayload]);
+  }, [instances, isGeneratingPreview, id, updatePayload, payloadRegistry]);
 
 
   const addInstance = useCallback(() => {
@@ -710,7 +657,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              const storeIsSynthesizing = storePayload?.isSynthesizing;
 
              // Prioritize Store Payload (if valid) > Optimistic Display > Instance Local > Draft
-             const effectivePreview = persistedPreview || displayPreviews[instance.index] || instance.payload?.previewUrl || previews[instance.index];
+             const effectivePreview = persistedPreview || displayPreviews[instance.index] || instance.payload?.previewUrl;
 
              // Pass the CONFIRMED URL for the next iteration step (Soft-Lock Refinement)
              const iterativeSource = storePayload?.sourceReference || instance.payload?.sourceReference;

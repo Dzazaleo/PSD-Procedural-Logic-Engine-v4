@@ -38,131 +38,106 @@ interface ProceduralContextType extends ProceduralState {
 const ProceduralContext = createContext<ProceduralContextType | null>(null);
 
 // --- HELPER: Reconcile Terminal State ---
-// Implements "Double-Buffer" Update Strategy + Stale Guard
+// Implements "Double-Buffer" Update Strategy + Stale Guard + Geometric Preservation
 const reconcileTerminalState = (
     incomingPayload: TransformedPayload, 
     currentPayload: TransformedPayload | undefined
 ): TransformedPayload => {
 
-    // GUARD: STALE UPDATE PROTECTION
-    // If the store has a newer generation ID than the incoming payload, ignore the incoming update.
-    // This prevents race conditions where a React Effect sends an old state after an async update has already landed.
+    // 1. STALE GUARD:
+    // If store has a newer generation ID than incoming, reject the update.
+    // This handles race conditions where a slow component render tries to save old data.
     if (currentPayload?.generationId && incomingPayload.generationId && incomingPayload.generationId < currentPayload.generationId) {
-        // Return current state, effectively dropping the stale incoming packet
         return currentPayload;
     }
 
-    // PHASE 1: FLUSH (Start Synthesis)
-    // If incoming payload marks start of synthesis, preserve current visuals but flag state.
+    // 2. GEOMETRIC PRESERVATION:
+    // If incoming payload has NO generationId (it's a layout/geometry update from React Flow),
+    // but the current payload HAS one (it's an AI result), preserve the AI visual state.
+    if (!incomingPayload.generationId && currentPayload?.generationId) {
+        return {
+            ...incomingPayload, // Accept new geometry (x, y, w, h)
+            // Restore Visual State from Store
+            previewUrl: currentPayload.previewUrl,
+            history: currentPayload.history,
+            activeHistoryIndex: currentPayload.activeHistoryIndex,
+            latestDraftUrl: currentPayload.latestDraftUrl,
+            generationId: currentPayload.generationId,
+            isSynthesizing: currentPayload.isSynthesizing,
+            isConfirmed: currentPayload.isConfirmed, 
+            isTransient: currentPayload.isTransient,
+            sourceReference: currentPayload.sourceReference || incomingPayload.sourceReference
+        };
+    }
+
+    // 3. FLUSH PHASE (Start Synthesis)
     if (incomingPayload.isSynthesizing) {
         return {
             ...(currentPayload || incomingPayload),
             isSynthesizing: true,
-            // Carry over vital metadata even during flush to prevent layout shifts
             sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
             targetContainer: incomingPayload.targetContainer || currentPayload?.targetContainer || '',
             metrics: incomingPayload.metrics || currentPayload?.metrics,
-            // Ensure we don't lose the current ID during flush
-            generationId: currentPayload?.generationId
+            generationId: currentPayload?.generationId // Keep ID valid during flush
         };
     }
 
-    // PHASE 2: FILL (Completion)
-    // Check if this is a fresh generation based on Unique ID.
+    // 4. FILL PHASE (New Content Arrival)
+    // Determine if this is a fresh generation
     const isNewGeneration = 
         !!incomingPayload.generationId && 
         (!currentPayload?.generationId || incomingPayload.generationId > currentPayload.generationId);
 
-    // Persist generation ID if not superseded by a new one
     const effectiveGenerationId = isNewGeneration ? incomingPayload.generationId : currentPayload?.generationId;
 
-    // IMMEDIATE EFFECT RECONCILIATION:
     if (isNewGeneration || (!currentPayload && incomingPayload.generationId)) {
-        // Carry over history from current if incoming is transient draft
+        // Carry over history
         const nextHistory = currentPayload?.history || [];
-        const nextActiveIndex = incomingPayload.isTransient 
-             ? nextHistory.length // Point to ghost
-             : (incomingPayload.activeHistoryIndex ?? nextHistory.length - 1);
-
+        
+        // If it's a transient draft, we don't push to history yet, just show it.
+        // If confirmed, we push.
+        
+        // However, if we simply generated a new draft, current UI behavior treats 'latestDraftUrl' as the ghost.
+        
         return {
             ...incomingPayload,
             history: nextHistory,
-            activeHistoryIndex: nextActiveIndex,
-            // If it's a new generation, the previewUrl is the latest draft
+            // If new draft, index points to 'future' (length)
+            activeHistoryIndex: incomingPayload.isTransient ? nextHistory.length : (nextHistory.length > 0 ? nextHistory.length - 1 : 0),
             latestDraftUrl: incomingPayload.isTransient ? incomingPayload.previewUrl : undefined,
-            isSynthesizing: false, 
-            generationId: effectiveGenerationId
-        };
-    }
-
-    const existingHistory = currentPayload?.history || [];
-    let nextHistory = existingHistory;
-    let nextDraftUrl = currentPayload?.latestDraftUrl;
-    let nextActiveIndex = currentPayload?.activeHistoryIndex;
-    
-    // Carry over history pointer if not explicitly reset
-    if (nextActiveIndex === undefined) nextActiveIndex = existingHistory.length > 0 ? existingHistory.length - 1 : 0;
-
-    const isIncomingTerminal = incomingPayload.isConfirmed && !incomingPayload.isTransient;
-    
-    // Case 1: Transient Update (Ghost Generation)
-    if (incomingPayload.isTransient) {
-        nextDraftUrl = incomingPayload.previewUrl;
-        // Point to the ghost (which effectively sits at 'length')
-        nextActiveIndex = nextHistory.length;
-        
-        return {
-            ...incomingPayload,
-            history: nextHistory,
-            activeHistoryIndex: nextActiveIndex,
-            latestDraftUrl: nextDraftUrl,
             isSynthesizing: false,
             generationId: effectiveGenerationId
         };
     }
-    
-    // Case 2: Terminal Commit (User Confirmed)
-    if (isIncomingTerminal) {
+
+    // 5. TERMINAL COMMIT (User Confirmed)
+    // If incoming is marked confirmed, we lock it into history.
+    if (incomingPayload.isConfirmed && !incomingPayload.isTransient) {
+        const existingHistory = currentPayload?.history || [];
         const confirmedUrl = incomingPayload.previewUrl;
+        let nextHistory = existingHistory;
 
-        // Atomic Commitment: Lock the URL into history
-        if (confirmedUrl) {
-            const lastHistory = existingHistory[existingHistory.length - 1];
-            // Only push if it's new
-            if (lastHistory !== confirmedUrl) {
-                nextHistory = [...existingHistory, confirmedUrl].slice(-10);
-            }
+        if (confirmedUrl && existingHistory[existingHistory.length - 1] !== confirmedUrl) {
+            nextHistory = [...existingHistory, confirmedUrl].slice(-10); // Keep last 10
         }
-        
-        // Ghost is now canonical. Clear draft buffer.
-        nextDraftUrl = undefined;
-        // Point to the new canonical tip
-        nextActiveIndex = nextHistory.length - 1;
-        
-        // ITERATIVE UPDATE: The confirmed payload becomes the new Source Reference for future refinements
-        const nextSourceReference = confirmedUrl || incomingPayload.sourceReference;
 
         return {
             ...incomingPayload,
-            // Ensure the persistent payload has the correct URL (Fixes Export Lookup)
-            previewUrl: confirmedUrl, 
             history: nextHistory,
-            activeHistoryIndex: nextActiveIndex,
-            latestDraftUrl: nextDraftUrl,
-            sourceReference: nextSourceReference, // Update reference for soft-lock refinement
-            isTransient: false, // Explicit sanitation
+            activeHistoryIndex: nextHistory.length - 1,
+            latestDraftUrl: undefined, // Clear draft slot
+            sourceReference: confirmedUrl, // Update Ref for next cycle
             isSynthesizing: false,
             generationId: effectiveGenerationId
         };
     }
-    
-    // Fallback (Idle/Other): Preserve state logic
+
+    // Fallback: Merge updates normally
     return {
         ...incomingPayload,
-        history: nextHistory,
-        activeHistoryIndex: nextActiveIndex,
-        latestDraftUrl: nextDraftUrl,
-        isSynthesizing: currentPayload?.isSynthesizing,
+        history: currentPayload?.history || [],
+        activeHistoryIndex: currentPayload?.activeHistoryIndex,
+        latestDraftUrl: currentPayload?.latestDraftUrl,
         generationId: effectiveGenerationId
     };
 };
@@ -230,7 +205,6 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
 
       // Deep equality check optimization
       if (currentPayload && JSON.stringify(currentPayload) === JSON.stringify(reconciledPayload)) {
-          // If purely identical, skip update
           return prev;
       }
 
@@ -272,7 +246,7 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
       const currentPayload = nodeRecord[handleId];
       
       // Safety: Cannot update non-existent payload unless sufficient data provided (assumed handled upstream)
-      if (!currentPayload && !partial.sourceContainer) return prev; 
+      if (!currentPayload && !partial.sourceContainer && !partial.previewUrl) return prev; 
 
       // Merge: State = Current + Partial
       const mergedPayload: TransformedPayload = currentPayload 
