@@ -28,7 +28,8 @@ interface ProceduralContextType extends ProceduralState {
   registerResolved: (nodeId: string, handleId: string, context: MappingContext) => void;
   registerPayload: (nodeId: string, handleId: string, payload: TransformedPayload) => void;
   registerAnalysis: (nodeId: string, handleId: string, strategy: LayoutStrategy) => void;
-  updatePreview: (nodeId: string, handleId: string, url: string) => void; // New method for AI Ghosts
+  updatePreview: (nodeId: string, handleId: string, url: string) => void;
+  seekHistory: (nodeId: string, handleId: string, direction: number) => void; 
   unregisterNode: (nodeId: string) => void;
   triggerGlobalRefresh: () => void;
 }
@@ -36,54 +37,74 @@ interface ProceduralContextType extends ProceduralState {
 const ProceduralContext = createContext<ProceduralContextType | null>(null);
 
 // --- HELPER: Reconcile Terminal State ---
-// Handles the "Handshake" between the transient generative engine and the persistent history buffer.
-// Logic:
-// 1. If incoming payload is TRANSIENT (Ghost): Preserve existing history, update preview.
-// 2. If incoming payload is TERMINAL (Confirmed): 
-//    - Identify if the *previous* state was stable.
-//    - Atomic Push: Bundle the previous stable state into history.
-//    - Prune: Implicitly drops any previous transient states by not pushing them.
 const reconcileTerminalState = (
     incomingPayload: TransformedPayload, 
     currentPayload: TransformedPayload | undefined
 ): TransformedPayload => {
     
-    // 1. Establish Baseline History
-    // If no current payload, history is empty. 
-    // If current payload exists, grab its history buffer.
     const existingHistory = currentPayload?.history || [];
-    
-    // 2. Determine State Transition
-    // Stable -> Stable (Refinement without intermediate ghost)
-    // Stable -> Ghost (Drafting)
-    // Ghost -> Stable (Confirmation)
-    const isIncomingTerminal = incomingPayload.isConfirmed && !incomingPayload.isTransient;
-    const wasPreviousStable = currentPayload && !currentPayload.isTransient && currentPayload.isConfirmed;
-    
     let nextHistory = existingHistory;
+    let nextDraftUrl = currentPayload?.latestDraftUrl;
+    let nextActiveIndex = currentPayload?.activeHistoryIndex;
+    
+    // Carry over history pointer if not explicitly reset, but default to 'tip' logic if undefined
+    if (nextActiveIndex === undefined) nextActiveIndex = existingHistory.length > 0 ? existingHistory.length - 1 : 0;
 
-    // 3. Atomic Push Logic
-    // We only commit to history when we receive a verified Terminal State.
-    // The item we commit is the *Previous Stable State* to allow Undo.
-    // If we are just browsing ghosts (Transient), we do NOT touch history.
-    if (isIncomingTerminal) {
-        // Only push if the previous state was actually stable and different
-        // This effectively "Prunes" any ghosts that happened in between, because we never pushed them.
-        if (wasPreviousStable && currentPayload.previewUrl && currentPayload.previewUrl !== incomingPayload.previewUrl) {
-             // Limit buffer size to 10
-             nextHistory = [...existingHistory, currentPayload.previewUrl].slice(-10);
-        }
-    } else {
-        // If incoming is Transient (Ghost), we maintain the *existing* history.
-        // We do not push the ghost to history. 
-        // We do not push the previous state yet (we wait for confirmation).
-        nextHistory = existingHistory;
+    const isIncomingTerminal = incomingPayload.isConfirmed && !incomingPayload.isTransient;
+    
+    // Case 1: Transient Update (Ghost Generation)
+    if (incomingPayload.isTransient) {
+        nextDraftUrl = incomingPayload.previewUrl;
+        // Point to the ghost (which effectively sits at 'length')
+        nextActiveIndex = nextHistory.length;
+        
+        return {
+            ...incomingPayload,
+            history: nextHistory,
+            activeHistoryIndex: nextActiveIndex,
+            latestDraftUrl: nextDraftUrl
+        };
     }
+    
+    // Case 2: Terminal Commit (User Confirmed)
+    if (isIncomingTerminal) {
+        const confirmedUrl = incomingPayload.previewUrl;
 
-    // 4. Return Reconciled Payload
+        // Atomic Commitment: Lock the URL into history
+        if (confirmedUrl) {
+            const lastHistory = existingHistory[existingHistory.length - 1];
+            // Only push if it's new
+            if (lastHistory !== confirmedUrl) {
+                nextHistory = [...existingHistory, confirmedUrl].slice(-10);
+            }
+        }
+        
+        // Ghost is now canonical. Clear draft buffer.
+        nextDraftUrl = undefined;
+        // Point to the new canonical tip
+        nextActiveIndex = nextHistory.length - 1;
+        
+        // ITERATIVE UPDATE: The confirmed payload becomes the new Source Reference for future refinements
+        const nextSourceReference = confirmedUrl || incomingPayload.sourceReference;
+
+        return {
+            ...incomingPayload,
+            // Ensure the persistent payload has the correct URL (Fixes Export Lookup)
+            previewUrl: confirmedUrl, 
+            history: nextHistory,
+            activeHistoryIndex: nextActiveIndex,
+            latestDraftUrl: nextDraftUrl,
+            sourceReference: nextSourceReference, // Update reference for soft-lock refinement
+            isTransient: false // Explicit sanitation
+        };
+    }
+    
+    // Fallback (Idle/Other): Preserve state logic
     return {
         ...incomingPayload,
-        history: nextHistory
+        history: nextHistory,
+        activeHistoryIndex: nextActiveIndex,
+        latestDraftUrl: nextDraftUrl
     };
 };
 
@@ -158,7 +179,6 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
               currentPayload.requiresGeneration === reconciledPayload.requiresGeneration;
 
           if (isPreviewChanged && isStructureStable) {
-               // EMIT EVENT: Notify listeners (RemapperNode UI) of a non-billable visual update.
                const event = new CustomEvent('payload-updated', { 
                    detail: { 
                        nodeId, 
@@ -172,7 +192,6 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
           }
       }
 
-      // Deep equality check
       if (currentPayload && JSON.stringify(currentPayload) === JSON.stringify(reconciledPayload)) return prev;
 
       return { 
@@ -226,6 +245,44 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     });
   }, []);
 
+  const seekHistory = useCallback((nodeId: string, handleId: string, direction: number) => {
+    setPayloadRegistry(prev => {
+        const nodeRecord = prev[nodeId];
+        if (!nodeRecord) return prev;
+        const payload = nodeRecord[handleId];
+        if (!payload) return prev;
+        
+        const history = payload.history || [];
+        const hasDraft = !!payload.latestDraftUrl;
+        const maxIndex = hasDraft ? history.length : Math.max(0, history.length - 1);
+        
+        const currentIndex = payload.activeHistoryIndex !== undefined ? payload.activeHistoryIndex : maxIndex;
+        const nextIndex = Math.max(0, Math.min(currentIndex + direction, maxIndex));
+        
+        if (nextIndex === currentIndex) return prev;
+        
+        // Resolve the View
+        let viewUrl: string | undefined;
+        if (nextIndex === history.length && hasDraft) {
+            viewUrl = payload.latestDraftUrl;
+        } else {
+            viewUrl = history[nextIndex];
+        }
+        
+        return {
+            ...prev,
+            [nodeId]: {
+                ...nodeRecord,
+                [handleId]: {
+                    ...payload,
+                    activeHistoryIndex: nextIndex,
+                    previewUrl: viewUrl
+                }
+            }
+        };
+    });
+  }, []);
+
   const unregisterNode = useCallback((nodeId: string) => {
     setPsdRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
     setTemplateRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
@@ -251,11 +308,12 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     registerPayload,
     registerAnalysis,
     updatePreview,
+    seekHistory,
     unregisterNode,
     triggerGlobalRefresh
   }), [
     psdRegistry, templateRegistry, resolvedRegistry, payloadRegistry, analysisRegistry, globalVersion,
-    registerPsd, registerTemplate, registerResolved, registerPayload, registerAnalysis, updatePreview,
+    registerPsd, registerTemplate, registerResolved, registerPayload, registerAnalysis, updatePreview, seekHistory,
     unregisterNode, triggerGlobalRefresh
   ]);
 

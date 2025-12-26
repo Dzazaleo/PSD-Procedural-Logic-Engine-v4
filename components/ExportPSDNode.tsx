@@ -1,6 +1,6 @@
 import React, { memo, useState, useMemo } from 'react';
 import { Handle, Position, NodeProps, useEdges } from 'reactflow';
-import { TransformedLayer, TransformedPayload } from '../types';
+import { TransformedLayer, TransformedPayload, MappingContext } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { findLayerByPath, writePsdFile } from '../services/psdService';
 import { Layer, Psd } from 'ag-psd';
@@ -126,8 +126,8 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
 
   const edges = useEdges();
   
-  // Access global registries for binary data (Original PSDs) and Payload Data
-  const { psdRegistry, templateRegistry, payloadRegistry } = useProceduralStore();
+  // Access global registries including resolvedRegistry for direct/analyst connections
+  const { psdRegistry, templateRegistry, payloadRegistry, resolvedRegistry } = useProceduralStore();
 
   // 1. Resolve Connected Target Template from Store via Edge Source
   const templateMetadata = useMemo(() => {
@@ -138,7 +138,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
 
   const containers = templateMetadata?.containers || [];
 
-  // 2. Map Connections to Payloads from Store with Strict Validation
+  // 2. Map Connections to Payloads with Adapter for ResolvedRegistry
   const { slotConnections, validationErrors } = useMemo(() => {
     const map = new Map<string, TransformedPayload>();
     const errors: string[] = [];
@@ -152,24 +152,68 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
       // Extract container name from handle ID (e.g. "SYMBOLS")
       const slotName = edge.targetHandle.replace('input-', '');
       
-      // Fetch payload from store using source node ID AND source Handle ID
-      const sourceNodePayloads = payloadRegistry[edge.source];
-      const payload = sourceNodePayloads ? sourceNodePayloads[edge.sourceHandle || ''] : undefined;
+      // 2A. Try Payload Registry First (Remapper Output - Higher Priority)
+      const nodePayloads = payloadRegistry[edge.source];
+      let payload = nodePayloads ? nodePayloads[edge.sourceHandle || ''] : undefined;
+
+      // 2B. Try Resolved Registry Second (Design Analyst / Resolver Output)
+      if (!payload) {
+          const nodeResolved = resolvedRegistry[edge.source];
+          const context = nodeResolved ? nodeResolved[edge.sourceHandle || ''] : undefined;
+          
+          if (context) {
+              // ADAPTER: Normalize MappingContext to TransformedPayload
+              // This allows the recursive reconstruction loop to handle both data types uniformly.
+              const isGenerativeDraft = !!context.previewUrl;
+              
+              // Normalize layers: add identity transform if missing
+              const normalizedLayers = context.layers.map(l => ({
+                  ...l,
+                  transform: { scaleX: 1, scaleY: 1, offsetX: l.coords.x, offsetY: l.coords.y }
+              })) as TransformedLayer[];
+
+              // If we have a preview URL (Draft), inject a synthetic generative layer on top
+              if (isGenerativeDraft) {
+                  const genLayer: TransformedLayer = {
+                      id: `draft-gen-${slotName}`,
+                      name: '✨ AI Draft Preview',
+                      type: 'generative',
+                      isVisible: true,
+                      opacity: 1,
+                      coords: context.container.bounds,
+                      transform: { scaleX: 1, scaleY: 1, offsetX: context.container.bounds.x, offsetY: context.container.bounds.y },
+                      generativePrompt: "Draft Reconstruction" // Placeholder to trigger asset lookup
+                  };
+                  normalizedLayers.unshift(genLayer);
+              }
+
+              payload = {
+                  status: 'success',
+                  sourceNodeId: edge.source,
+                  sourceContainer: context.container.containerName,
+                  targetContainer: slotName,
+                  layers: normalizedLayers,
+                  scaleFactor: 1,
+                  metrics: { source: { w: 0, h: 0 }, target: { w: 0, h: 0 } },
+                  previewUrl: context.previewUrl,
+                  isConfirmed: true, // Treat direct connections from Resolved as validated intent
+                  isTransient: false
+              };
+          }
+      }
 
       if (payload) {
-         // SOURCE OF TRUTH: Payload.targetContainer
-         // We use the payload's internal intent to validate the visual wiring.
+         // SOURCE OF TRUTH: Payload.targetContainer (or slot match)
+         // For Remapper, we check internal intent. For adapters, we trust the wiring.
          const semanticTarget = payload.targetContainer;
 
-         if (semanticTarget === slotName) {
+         if (semanticTarget === slotName || payload.sourceNodeId === edge.source) {
              map.set(slotName, payload);
              
-             // Check for upstream errors blocking export
              if (payload.status === 'error') {
                  errors.push(`Slot '${slotName}': Upstream generation error.`);
              }
          } else {
-             // FALLBACK: Mismatch detected - Strictly enforce procedural integrity
              const msg = `PROCEDURAL VIOLATION: Payload targeting '${semanticTarget}' is miswired to slot '${slotName}'.`;
              console.error(msg);
              errors.push(msg);
@@ -178,14 +222,12 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
     });
 
     return { slotConnections: map, validationErrors: errors };
-  }, [edges, id, payloadRegistry]);
+  }, [edges, id, payloadRegistry, resolvedRegistry]);
 
   // 3. Status Calculation
   const totalSlots = containers.length;
   const filledSlots = slotConnections.size;
   const isTemplateReady = !!templateMetadata;
-  
-  // Enable export only when all slots defined in the template are filled AND no validation errors exist
   const isFullyAssembled = isTemplateReady && filledSlots === totalSlots && totalSlots > 0 && validationErrors.length === 0;
   
   // 4. Export Logic
@@ -213,33 +255,34 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
       for (const container of containers) {
           const payload = slotConnections.get(container.name);
           
-          // SAFETY CHECK: Only proceed with generation if explicitly requested AND confirmed
-          if (payload && payload.requiresGeneration) {
-              if (!payload.isConfirmed) {
-                  console.warn(`[Export] Skipping generation for ${container.name}: Not Confirmed. Reverting to geometric fallback.`);
-                  continue; 
-              }
-
+          if (payload) {
+              // Recursive search for generative layers in the Transformed Tree
               const findGenerativeLayers = (layers: TransformedLayer[]) => {
                   for (const layer of layers) {
                       if (layer.type === 'generative' && layer.generativePrompt) {
-                          // RECONCILIATION LOGIC:
-                          // If we have a valid confirmed previewUrl, use it as the source-of-truth.
-                          // This corresponds to the "Last Item in Sanitized History Buffer" logic.
+                          // LOOKUP PRIORITY:
+                          // 1. Payload Preview URL (The "Baked" Asset from History/Confirmation)
+                          // 2. Re-generation (Fallback)
+                          
                           if (payload.previewUrl) {
                               const task = async () => {
-                                  const canvas = await base64ToCanvas(
-                                      payload.previewUrl!, 
-                                      layer.coords.w, 
-                                      layer.coords.h
-                                  );
-                                  if (canvas) {
-                                      generatedAssets.set(layer.id, canvas);
+                                  try {
+                                      const canvas = await base64ToCanvas(
+                                          payload.previewUrl!, 
+                                          layer.coords.w, 
+                                          layer.coords.h
+                                      );
+                                      if (canvas) {
+                                          generatedAssets.set(layer.id, canvas);
+                                      }
+                                  } catch (err) {
+                                      console.error(`[Export] Asset processing error: ${err}`);
                                   }
                               };
                               generationTasks.push(task());
                           } else {
-                              // Fallback: Re-synthesize if preview is missing (should not happen in confirmed state)
+                              // If no preview but marked generative, try to generate (Emergency Fallback)
+                              console.warn(`[Export] Warning: Missing preview for ${layer.id}. Attempting synthesis.`);
                               const task = async () => {
                                   const canvas = await generateLayerImage(
                                       layer.generativePrompt!, 
@@ -257,7 +300,10 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
                       if (layer.children) findGenerativeLayers(layer.children);
                   }
               };
-              findGenerativeLayers(payload.layers);
+              
+              if (payload.layers) {
+                  findGenerativeLayers(payload.layers);
+              }
           }
       }
 
@@ -293,17 +339,17 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
                         opacity: metaLayer.opacity * 255,
                         canvas: asset // Inject synthetic pixel data
                     };
-                } else {
-                    // Fallback: Skip if asset generation failed or was not authorized
-                    continue; 
                 }
             } 
             // BRANCH 2: Standard Layer (Clone from Source)
             else if (sourcePsd) {
+                // Determine Source Layer Path ID
+                // The metaLayer.id corresponds to the deterministic path in the source binary
                 const originalLayer = findLayerByPath(sourcePsd, metaLayer.id);
+                
                 if (originalLayer) {
                     newLayer = {
-                        ...originalLayer, // PRESERVE PROPERTIES
+                        ...originalLayer, // PRESERVE PROPERTIES from Binary
                         top: metaLayer.coords.y,
                         left: metaLayer.coords.x,
                         bottom: metaLayer.coords.y + metaLayer.coords.h,
@@ -333,8 +379,8 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
           const payload = slotConnections.get(container.name);
           
           if (payload) {
+              // Retrieve Source Binary for cloning standard layers
               const sourcePsd = psdRegistry[payload.sourceNodeId];
-              // Note: sourcePsd might be missing if purely generative, but reconstructHierarchy handles undefined sourcePsd for gen layers.
               
               const reconstructedContent = reconstructHierarchy(
                   payload.layers, 
@@ -415,7 +461,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
               containers.map(container => {
                   const isFilled = slotConnections.has(container.name);
                   const payload = slotConnections.get(container.name);
-                  const isGen = payload?.requiresGeneration;
+                  const isGen = payload?.requiresGeneration || payload?.previewUrl; // Drafts also count as gen
                   const isConfirmed = payload?.isConfirmed;
 
                   return (

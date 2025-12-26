@@ -31,9 +31,12 @@ interface InstanceData {
 interface OverlayProps {
     previewUrl?: string | null;
     history?: string[];
+    activeHistoryIndex?: number;
+    hasDraft?: boolean;
     isGenerating: boolean;
     scale: number;
     onConfirm: (url?: string) => void;
+    onSeek: (direction: number) => void;
     canConfirm: boolean;
     isConfirmed: boolean;
     targetDimensions?: { w: number, h: number };
@@ -45,9 +48,12 @@ interface OverlayProps {
 const GenerativePreviewOverlay = ({ 
     previewUrl, 
     history = [],
+    activeHistoryIndex,
+    hasDraft,
     isGenerating,
     scale,
     onConfirm,
+    onSeek,
     canConfirm,
     isConfirmed,
     targetDimensions,
@@ -60,45 +66,15 @@ const GenerativePreviewOverlay = ({
     const ratio = w / h;
     const maxWidthStyle = `${240 * ratio}px`;
     
-    // Ghost History Logic
-    // Flatten history + current into a navigable list
-    // If previewUrl changes, we reset to the end of the list
-    const [viewIndex, setViewIndex] = useState(-1);
+    // Calculate timeline bounds
+    // Max Index = history.length if hasDraft, else history.length - 1
+    const maxIndex = hasDraft ? history.length : Math.max(0, history.length - 1);
+    const currentIndex = activeHistoryIndex !== undefined ? activeHistoryIndex : maxIndex;
     
-    // Construct the timeline: [oldest, ..., newest]
-    // Filter out nulls/undefined to be safe
-    const timeline = useMemo(() => {
-        const list = [...history];
-        if (previewUrl && !list.includes(previewUrl)) {
-            list.push(previewUrl);
-        }
-        return list;
-    }, [history, previewUrl]);
-
-    // Initialize/Reset View to Latest when timeline grows
-    useEffect(() => {
-        if (timeline.length > 0) {
-            setViewIndex(timeline.length - 1);
-        }
-    }, [timeline.length]);
-
-    // Handle Bounds
-    const safeIndex = Math.max(0, Math.min(viewIndex, timeline.length - 1));
-    const displayUrl = timeline[safeIndex];
-    
-    // Navigation Handlers
-    const goPrev = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        setViewIndex(prev => Math.max(0, prev - 1));
-    };
-    
-    const goNext = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        setViewIndex(prev => Math.min(timeline.length - 1, prev + 1));
-    };
-
-    const isLatest = safeIndex === timeline.length - 1;
-    const hasHistory = timeline.length > 1;
+    // Check if current view is the "Latest" (tip of the timeline)
+    const isLatest = currentIndex === maxIndex;
+    // Check if timeline has navigable history
+    const hasHistory = maxIndex > 0;
 
     return (
         <div className={`relative w-full mt-2 rounded-md overflow-hidden bg-slate-900/50 border transition-all duration-500 flex justify-center flex-col items-center ${isGenerating ? 'border-indigo-500/30' : 'border-purple-500/50'}`}>
@@ -112,7 +88,6 @@ const GenerativePreviewOverlay = ({
                 }}
              >
                  {/* Visual Grounding: Source Reference Thumbnail */}
-                 {/* Moved to TOP-LEFT to unobstruct the action area */}
                  {sourceReference && (
                      <div className="absolute top-2 left-2 z-20 flex flex-col items-start group/source pointer-events-none">
                         <div className="bg-black/60 backdrop-blur-md border border-white/20 p-0.5 rounded shadow-xl transition-transform transform group-hover/source:scale-150 origin-top-left">
@@ -129,9 +104,9 @@ const GenerativePreviewOverlay = ({
                  )}
                  
                  {/* 1. The Ghost Image */}
-                 {displayUrl ? (
+                 {previewUrl ? (
                      <img 
-                        src={displayUrl} 
+                        src={previewUrl} 
                         onLoad={onImageLoad}
                         alt="AI Ghost" 
                         className={`w-full h-full object-cover transition-all duration-700 
@@ -156,11 +131,11 @@ const GenerativePreviewOverlay = ({
                  )}
 
                  {/* 3. Action Utility Bar (Top-Right, Unobstructed) */}
-                 {displayUrl && (
+                 {previewUrl && (
                      <div className={`absolute top-2 right-2 z-40 flex flex-col items-end transition-opacity duration-300 ${!canConfirm && isLatest && isConfirmed ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
                         {(canConfirm || !isLatest || !isConfirmed) && (
                              <button 
-                                onClick={(e) => { e.stopPropagation(); onConfirm(displayUrl); }}
+                                onClick={(e) => { e.stopPropagation(); onConfirm(previewUrl); }}
                                 className="bg-indigo-600/90 hover:bg-indigo-500 text-white p-1.5 rounded shadow-[0_4px_10px_rgba(0,0,0,0.3)] border border-white/20 transform hover:scale-105 active:scale-95 transition-all flex items-center space-x-1.5 backdrop-blur-[2px]"
                                 title="Commit this generation to the pipeline"
                              >
@@ -186,7 +161,7 @@ const GenerativePreviewOverlay = ({
                             ? 'bg-emerald-900/80 text-emerald-200 border-emerald-500/50' 
                             : 'bg-purple-900/80 text-purple-200 border-purple-500/50'
                         }`}>
-                         {isConfirmed && isLatest ? 'CONFIRMED' : !isLatest ? `HISTORY ${safeIndex + 1}/${timeline.length}` : 'PREVIEW'}
+                         {isConfirmed && isLatest ? 'CONFIRMED' : !isLatest ? `HISTORY ${currentIndex + 1}/${maxIndex + 1}` : 'PREVIEW'}
                      </span>
                      {isGenerating && (
                          <span className="flex h-1.5 w-1.5 relative">
@@ -201,26 +176,26 @@ const GenerativePreviewOverlay = ({
              {hasHistory && (
                  <div className="w-full flex items-center justify-between px-2 py-1 bg-black/40 border-t border-white/5">
                      <button 
-                         onClick={goPrev}
-                         disabled={safeIndex === 0}
-                         className={`p-1 rounded hover:bg-white/10 transition-colors ${safeIndex === 0 ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'}`}
+                         onClick={(e) => { e.stopPropagation(); onSeek(-1); }}
+                         disabled={currentIndex === 0}
+                         className={`p-1 rounded hover:bg-white/10 transition-colors ${currentIndex === 0 ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'}`}
                      >
                          <ChevronLeft size={12} />
                      </button>
                      
                      <div className="flex space-x-1">
-                         {timeline.map((_, i) => (
+                         {Array.from({ length: maxIndex + 1 }).map((_, i) => (
                              <div 
                                 key={i} 
-                                className={`w-1 h-1 rounded-full transition-colors ${i === safeIndex ? 'bg-purple-400' : 'bg-slate-600'}`}
+                                className={`w-1 h-1 rounded-full transition-colors ${i === currentIndex ? 'bg-purple-400' : 'bg-slate-600'}`}
                              />
                          ))}
                      </div>
 
                      <button 
-                         onClick={goNext}
-                         disabled={safeIndex === timeline.length - 1}
-                         className={`p-1 rounded hover:bg-white/10 transition-colors ${safeIndex === timeline.length - 1 ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'}`}
+                         onClick={(e) => { e.stopPropagation(); onSeek(1); }}
+                         disabled={currentIndex === maxIndex}
+                         className={`p-1 rounded hover:bg-white/10 transition-colors ${currentIndex === maxIndex ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'}`}
                      >
                          <ChevronRight size={12} />
                      </button>
@@ -264,7 +239,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const nodes = useNodes();
   
   // Consume data from Store
-  const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, unregisterNode } = useProceduralStore();
+  const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, seekHistory, unregisterNode } = useProceduralStore();
 
   // Cleanup
   useEffect(() => {
@@ -276,8 +251,8 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const handleConfirmGeneration = (index: number, prompt: string, restoredUrl?: string) => {
       setConfirmations(prev => ({ ...prev, [index]: prompt }));
       
-      // If we are restoring an old version, update the local preview state
-      // This triggers a pipeline update which will push the old version as the "new" current one
+      // CRITICAL FIX: Ensure the confirmed URL is also updated in local state so the 
+      // subsequent registerPayload call sees the correct "source" for the payload.
       if (restoredUrl) {
           setPreviews(prev => ({ ...prev, [index]: restoredUrl }));
       }
@@ -478,7 +453,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
               requiresGeneration: requiresGeneration,
               previewUrl: sourceData.previewUrl || previews[i],
               isConfirmed: isConfirmed,
-              isTransient: !isConfirmed, // Ghost Sanitation: Mark as transient if not confirmed
+              isTransient: !isConfirmed, 
               sourceReference: sourceData.aiStrategy?.sourceReference
             };
         }
@@ -661,9 +636,19 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
              const refinementPending = !!confirmedPrompt && !!currentPrompt && confirmedPrompt !== currentPrompt;
              const showOverlay = hasPreview || isAwaiting || refinementPending;
 
-             // Fetch History from Store Payload (not the recalculated instance payload)
+             // Fetch History directly from Store Payload (Source of Truth for Navigation)
              const storePayload = payloadRegistry[id]?.[`result-out-${instance.index}`];
              const history = storePayload?.history || [];
+             const activeIndex = storePayload?.activeHistoryIndex;
+             const latestDraft = storePayload?.latestDraftUrl;
+             // The storePayload also holds the canonical confirmed URL which might differ from local calculation if navigation occurred
+             const persistedPreview = storePayload?.previewUrl;
+
+             // Prioritize Store Payload (if valid) > Optimistic Display > Instance Local > Draft
+             const effectivePreview = persistedPreview || displayPreviews[instance.index] || instance.payload?.previewUrl || previews[instance.index];
+
+             // Pass the CONFIRMED URL for the next iteration step (Soft-Lock Refinement)
+             const iterativeSource = storePayload?.sourceReference || instance.payload?.sourceReference;
 
              return (
              <div key={instance.index} className="relative p-3 border-b border-slate-700/50 bg-slate-800 space-y-3 hover:bg-slate-700/20 transition-colors first:rounded-t-none">
@@ -763,15 +748,18 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                    )}
                                    
                                    <GenerativePreviewOverlay 
-                                       previewUrl={displayPreviews[instance.index] || instance.payload.previewUrl || previews[instance.index]}
+                                       previewUrl={effectivePreview}
                                        history={history}
+                                       activeHistoryIndex={activeIndex}
+                                       hasDraft={!!latestDraft}
                                        isGenerating={!!isGeneratingPreview[instance.index]}
                                        scale={instance.payload.scaleFactor}
                                        onConfirm={(url) => handleConfirmGeneration(instance.index, instance.source.aiStrategy?.generativePrompt || '', url)}
+                                       onSeek={(direction) => seekHistory(id, `result-out-${instance.index}`, direction)}
                                        canConfirm={isAwaiting || refinementPending}
                                        isConfirmed={isConfirmed}
                                        targetDimensions={instance.source.targetDimensions || instance.target.bounds}
-                                       sourceReference={instance.payload.sourceReference}
+                                       sourceReference={iterativeSource}
                                        onImageLoad={() => handleImageLoad(instance.index)}
                                        refinementPending={refinementPending}
                                    />

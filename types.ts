@@ -150,6 +150,8 @@ export interface TransformedPayload {
   isTransient?: boolean; // New Flag: Marks in-progress/unconfirmed generative states
   sourceReference?: string; // Carried over from Strategy for Export/Gen use
   history?: string[]; // History of preview URLs for navigation/undo
+  activeHistoryIndex?: number; // Pointer for time-travel navigation
+  latestDraftUrl?: string; // Holding pen for the Active Ghost when browsing history
 }
 
 export interface RemapperConfig {
