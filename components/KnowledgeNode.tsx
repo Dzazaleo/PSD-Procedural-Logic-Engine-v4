@@ -1,9 +1,10 @@
 import React, { memo, useCallback, useState, useEffect, useRef } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
 import { useProceduralStore } from '../store/ProceduralContext';
-import { PSDNodeData, VisualAnchor } from '../types';
-import { BookOpen, Image as ImageIcon, FileText, Trash2, UploadCloud, BrainCircuit, Loader2, CheckCircle2, AlertCircle, X, Layers } from 'lucide-react';
+import { PSDNodeData, VisualAnchor, KnowledgeContext } from '../types';
+import { BookOpen, Image as ImageIcon, FileText, Trash2, UploadCloud, BrainCircuit, Loader2, CheckCircle2, AlertCircle, X, Layers, RefreshCw } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
+import { GoogleGenAI } from "@google/genai";
 
 // Initialize PDF Worker from CDN to handle parsing off the main thread
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs';
@@ -115,9 +116,11 @@ const optimizeImage = (file: File): Promise<VisualAnchor> => {
 export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [isDistilling, setIsDistilling] = useState(false);
+  const [lastSynced, setLastSynced] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const { unregisterNode } = useProceduralStore();
+  const { registerKnowledge, unregisterNode } = useProceduralStore();
 
   // Cleanup on unmount
   useEffect(() => {
@@ -219,26 +222,101 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         if (target?.preview) URL.revokeObjectURL(target.preview);
         return prev.filter(f => f.id !== fileId);
     });
+    // Invalidate sync status
+    setLastSynced(null);
+  };
+
+  const distillKnowledge = async () => {
+    setIsDistilling(true);
+    try {
+        // 1. Aggregate Content
+        const rawText = stagedFiles
+            .filter(f => f.type === 'pdf' && f.extractedText)
+            .map(f => `--- SOURCE: ${f.file.name} ---\n${f.extractedText}`)
+            .join('\n\n');
+
+        const visualAnchors = stagedFiles
+            .filter(f => f.type === 'image' && f.visualAnchor)
+            .map(f => f.visualAnchor!);
+
+        let finalRules = "";
+
+        // 2. AI Distillation (if text exists)
+        if (rawText.trim().length > 0) {
+            const apiKey = process.env.API_KEY;
+            if (apiKey) {
+                const ai = new GoogleGenAI({ apiKey });
+                const response = await ai.models.generateContent({
+                    model: 'gemini-3-flash-preview',
+                    contents: `
+                        SOURCE MATERIAL:
+                        ${rawText.substring(0, 25000)} // Truncate to be safe
+                        
+                        TASK:
+                        Summarize the above brand manual content into a concise, numbered list of 10-15 actionable 'Procedural Design Rules'. 
+                        Focus on spatial layout, typography rules, color usage logic, and hierarchy.
+                        e.g., 'Primary titles must have 24px top padding', 'Use a 12-column grid'.
+                        
+                        Format as plain text.
+                    `,
+                    config: {
+                        systemInstruction: "You are a Design Systems Lead. Extract strict procedural logic from brand guidelines."
+                    }
+                });
+                finalRules = response.text || "No rules generated.";
+            } else {
+                 finalRules = "API Key missing. Rules could not be distilled from text.";
+            }
+        } else if (visualAnchors.length > 0) {
+            finalRules = "Adhere to the visual style, color palette, and spatial rhythm of the attached reference images.";
+        } else {
+             // No content
+             setIsDistilling(false);
+             return; 
+        }
+
+        // 3. Broadcast to Store
+        const context: KnowledgeContext = {
+            sourceNodeId: id,
+            rules: finalRules,
+            visualAnchors: visualAnchors
+        };
+
+        registerKnowledge(id, context);
+        setLastSynced(Date.now());
+
+    } catch (e) {
+        console.error("Distillation error", e);
+    } finally {
+        setIsDistilling(false);
+    }
   };
 
   // Derived state for the Visual Anchor Gallery
   const completedVisualAnchors = stagedFiles.filter(f => f.type === 'image' && f.status === 'complete' && f.visualAnchor && f.preview);
+  const hasContent = stagedFiles.some(f => f.status === 'complete');
+  const isSyncActive = !!lastSynced;
 
   return (
-    <div className="w-[300px] bg-slate-900 rounded-lg shadow-2xl border border-teal-500/50 font-sans flex flex-col overflow-hidden">
+    <div className={`w-[300px] bg-slate-900 rounded-lg shadow-2xl border transition-all duration-300 font-sans flex flex-col overflow-hidden ${isSyncActive ? 'border-teal-500 shadow-[0_0_15px_rgba(20,184,166,0.2)]' : 'border-teal-500/50'}`}>
       
       {/* Header */}
       <div className="bg-teal-900/30 p-2 border-b border-teal-800 flex items-center justify-between shrink-0">
          <div className="flex items-center space-x-2">
-           <div className="p-1.5 bg-teal-500/20 rounded-full border border-teal-500/50">
-             <BrainCircuit className="w-4 h-4 text-teal-300" />
+           <div className={`p-1.5 rounded-full border transition-all duration-500 ${isDistilling ? 'bg-teal-400 border-teal-200 animate-pulse' : 'bg-teal-500/20 border-teal-500/50'}`}>
+             <BrainCircuit className={`w-4 h-4 ${isDistilling ? 'text-teal-900' : 'text-teal-300'}`} />
            </div>
            <div className="flex flex-col leading-none">
              <span className="text-sm font-bold text-teal-100">Project Brain</span>
              <span className="text-[9px] text-teal-400">Context Engine</span>
            </div>
          </div>
-         <span className="text-[9px] text-teal-500/70 font-mono border border-teal-800 px-1 rounded bg-black/20">KNOWLEDGE</span>
+         <div className="flex items-center space-x-2">
+             {lastSynced && (
+                 <span className="text-[8px] text-teal-300 font-mono animate-pulse">LIVE</span>
+             )}
+             <span className="text-[9px] text-teal-500/70 font-mono border border-teal-800 px-1 rounded bg-black/20">KNOWLEDGE</span>
+         </div>
       </div>
 
       {/* Body */}
@@ -378,15 +456,44 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
             </div>
         )}
         
-        {/* Distillation Status / Controls (Placeholder for Phase 3) */}
-        {stagedFiles.length > 0 && (
-            <div className="pt-2 border-t border-slate-700/50">
-                 <button className="w-full py-1.5 bg-slate-700 text-slate-500 text-[10px] font-bold uppercase tracking-wider rounded cursor-not-allowed flex items-center justify-center space-x-2" disabled>
-                     <BookOpen className="w-3 h-3" />
-                     <span>Distill Knowledge (Coming Soon)</span>
-                 </button>
-            </div>
-        )}
+        {/* Distillation & Broadcast Controls */}
+        <div className="pt-2 border-t border-slate-700/50">
+             <button 
+                onClick={distillKnowledge}
+                disabled={!hasContent || isDistilling}
+                className={`w-full py-2 text-[10px] font-bold uppercase tracking-wider rounded shadow-lg flex items-center justify-center space-x-2 transition-all duration-300
+                    ${isDistilling 
+                        ? 'bg-slate-700 text-slate-400 cursor-wait' 
+                        : hasContent
+                            ? 'bg-teal-600 hover:bg-teal-500 text-white transform hover:-translate-y-0.5'
+                            : 'bg-slate-800 text-slate-600 cursor-not-allowed'
+                    }
+                `}
+             >
+                 {isDistilling ? (
+                     <>
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        <span>Distilling Knowledge...</span>
+                     </>
+                 ) : lastSynced ? (
+                     <>
+                        <CheckCircle2 className="w-3 h-3" />
+                        <span>Sync to Project Brain</span>
+                     </>
+                 ) : (
+                     <>
+                        <BookOpen className="w-3 h-3" />
+                        <span>Distill & Broadcast</span>
+                     </>
+                 )}
+             </button>
+             
+             {lastSynced && (
+                 <div className="text-[8px] text-teal-500/70 text-center mt-1 font-mono">
+                     Last Synced: {new Date(lastSynced).toLocaleTimeString()}
+                 </div>
+             )}
+        </div>
 
       </div>
 
@@ -395,7 +502,9 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         type="source"
         position={Position.Right}
         id="knowledge-out"
-        className="!w-3 !h-3 !-right-1.5 !bg-teal-500 !border-2 !border-white transition-colors duration-300"
+        className={`!w-3 !h-3 !-right-1.5 !border-2 transition-all duration-500
+            ${isSyncActive ? '!bg-teal-500 !border-white shadow-[0_0_10px_#14b8a6]' : '!bg-slate-600 !border-slate-400'}
+        `}
         style={{ top: '50%', transform: 'translateY(-50%)' }}
         title="Output: Global Knowledge Context"
       />
