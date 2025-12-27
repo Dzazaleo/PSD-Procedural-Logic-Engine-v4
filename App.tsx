@@ -22,7 +22,8 @@ import { ContainerResolverNode } from './components/ContainerResolverNode';
 import { RemapperNode } from './components/RemapperNode';
 import { DesignAnalystNode } from './components/DesignAnalystNode'; 
 import { ExportPSDNode } from './components/ExportPSDNode';
-import { ProjectControls } from './components/ProjectControls'; // NEW IMPORT
+import { KnowledgeNode } from './components/KnowledgeNode'; // NEW IMPORT
+import { ProjectControls } from './components/ProjectControls';
 import { PSDNodeData } from './types';
 import { ProceduralStoreProvider } from './store/ProceduralContext';
 
@@ -31,6 +32,12 @@ const initialNodes: Node<PSDNodeData>[] = [
     id: 'node-1',
     type: 'loadPsd',
     position: { x: 50, y: 50 },
+    data: { fileName: null, template: null, validation: null, designLayers: null },
+  },
+  {
+    id: 'node-knowledge-1', // NEW KNOWLEDGE NODE
+    type: 'knowledge',
+    position: { x: 50, y: 350 },
     data: { fileName: null, template: null, validation: null, designLayers: null },
   },
   {
@@ -206,6 +213,7 @@ const App: React.FC = () => {
     remapper: RemapperNode,
     designAnalyst: DesignAnalystNode, 
     exportPsd: ExportPSDNode,
+    knowledge: KnowledgeNode, // REGISTERED
   }), []);
 
   return (
