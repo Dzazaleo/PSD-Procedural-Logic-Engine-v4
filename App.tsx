@@ -167,12 +167,19 @@ const App: React.FC = () => {
 
         // Design Analyst Validation Rules
         if (targetNode.type === 'designAnalyst') {
-            if (params.targetHandle === 'source-in') {
+            const handle = params.targetHandle || '';
+
+            if (handle === 'knowledge-in') {
+                if (sourceNode.type !== 'knowledge') {
+                    console.warn("Design Analyst 'Knowledge' input requires a Knowledge Node source.");
+                    return;
+                }
+            } else if (handle.startsWith('source-in')) {
                 if (sourceNode.type !== 'containerResolver') {
                     console.warn("Design Analyst 'Source' requires a Container Resolver.");
                     return;
                 }
-            } else if (params.targetHandle === 'target-in') {
+            } else if (handle.startsWith('target-in')) {
                 if (sourceNode.type !== 'targetSplitter') {
                     console.warn("Design Analyst 'Target' requires a Target Splitter.");
                     return;
