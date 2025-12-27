@@ -68,6 +68,7 @@ const initialNodes: Node<PSDNodeData>[] = [
     type: 'designAnalyst',
     position: { x: 1300, y: 300 },
     data: { fileName: null, template: null, validation: null, designLayers: null },
+    style: { width: 650 },
   },
   {
     id: 'node-remapper-1',
