@@ -1,9 +1,10 @@
 import React, { memo, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Handle, Position, NodeProps, useEdges, NodeResizer, useReactFlow, useUpdateNodeInternals, useNodes } from 'reactflow';
-import { PSDNodeData, LayoutStrategy, SerializableLayer, ChatMessage, AnalystInstanceState, ContainerContext, TemplateMetadata, ContainerDefinition, MappingContext } from '../types';
+import { PSDNodeData, LayoutStrategy, SerializableLayer, ChatMessage, AnalystInstanceState, ContainerContext, TemplateMetadata, ContainerDefinition, MappingContext, KnowledgeContext } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { getSemanticThemeObject, findLayerByPath } from '../services/psdService';
 import { GoogleGenAI, Type } from "@google/genai";
+import { Brain } from 'lucide-react';
 import { Psd } from 'ag-psd';
 
 // Define the exact union type for model keys to match PSDNodeData
@@ -74,6 +75,16 @@ const StrategyCard: React.FC<{ strategy: LayoutStrategy, modelConfig: ModelConfi
                      </span>
                 )}
              </div>
+
+             {/* Knowledge Badge */}
+             {strategy.knowledgeApplied && (
+                 <div className="flex items-center space-x-1.5 p-1 bg-teal-900/30 border border-teal-500/30 rounded mt-1">
+                     <Brain className="w-3 h-3 text-teal-400" />
+                     <span className="text-[9px] text-teal-300 font-bold uppercase tracking-wider">
+                         Knowledge Informed
+                     </span>
+                 </div>
+             )}
              
              <div className="grid grid-cols-2 gap-4 mt-1">
                 <div>
@@ -120,10 +131,11 @@ interface InstanceRowProps {
     onModelChange: (index: number, model: ModelKey) => void;
     isAnalyzing: boolean;
     compactMode: boolean;
+    activeKnowledge?: KnowledgeContext | null; // Pass down for visual effect
 }
 
 const InstanceRow: React.FC<InstanceRowProps> = ({ 
-    nodeId, index, state, sourceData, targetData, onAnalyze, onRefine, onModelChange, isAnalyzing, compactMode 
+    nodeId, index, state, sourceData, targetData, onAnalyze, onRefine, onModelChange, isAnalyzing, compactMode, activeKnowledge 
 }) => {
     const [inputText, setInputText] = useState('');
     const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -250,7 +262,18 @@ const InstanceRow: React.FC<InstanceRowProps> = ({
                             </div>
                         </div>
                     ))}
-                    {isAnalyzing && (<div className="flex items-center space-x-2 text-xs text-slate-400 animate-pulse pl-1"><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div><span>Analyst is thinking...</span></div>)}
+                    {isAnalyzing && (
+                        <div className="flex items-center space-x-2 text-xs text-slate-400 animate-pulse pl-1">
+                            <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div>
+                            <span>Analyst is thinking...</span>
+                            {activeKnowledge && (
+                                <span className="text-[9px] text-teal-400 font-bold ml-1 flex items-center gap-1">
+                                    <Brain className="w-3 h-3" />
+                                    + Rules & Anchors
+                                </span>
+                            )}
+                        </div>
+                    )}
                 </div>
 
                 {/* Control Footer */}
@@ -507,7 +530,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
      }
   };
 
-  const generateSystemInstruction = (sourceData: any, targetData: any, isRefining: boolean) => {
+  const generateSystemInstruction = (sourceData: any, targetData: any, isRefining: boolean, knowledgeContext: KnowledgeContext | null) => {
     const sourceW = sourceData.container.bounds.w;
     const sourceH = sourceData.container.bounds.h;
     const targetW = targetData.bounds.w;
@@ -572,6 +595,10 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
         3. Provide the specific 'generativePrompt'.
     `;
     
+    if (knowledgeContext && knowledgeContext.rules) {
+        prompt = `[GLOBAL PROJECT KNOWLEDGE - MANDATORY]\n${knowledgeContext.rules}\n\nThe above rules override standard geometric defaults. Ensure 'overrides' and 'method' choices strictly adhere to these constraints.\n\n` + prompt;
+    }
+    
     if (isRefining) {
         prompt += `\n\nUSER FEEDBACK RECEIVED. Adjust the 'overrides' array to satisfy the user request while maintaining valid JSON structure and boundary safety.`;
     }
@@ -594,8 +621,48 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
         if (!apiKey) throw new Error("API_KEY missing");
 
         const ai = new GoogleGenAI({ apiKey });
-        const systemInstruction = generateSystemInstruction(sourceData, targetData, history.length > 1);
-        const contents = history.map(msg => ({ role: msg.role, parts: msg.parts }));
+        const systemInstruction = generateSystemInstruction(sourceData, targetData, history.length > 1, activeKnowledge);
+        
+        // --- Multimodal Fusion & Source Vision Injection ---
+        // We construct the contents array, and augment the *last* user message to include visual context.
+        // This gives the model "Vision" of both the Source Layers and the Reference Anchors.
+        
+        // 1. Extract Source Pixels for Vision
+        const sourcePixelsBase64 = await extractSourcePixels(sourceData.layers as SerializableLayer[], sourceData.container.bounds);
+
+        const apiContents = history.map(msg => ({ role: msg.role, parts: [...msg.parts] }));
+        const lastMessage = apiContents[apiContents.length - 1];
+
+        if (lastMessage.role === 'user') {
+            const newParts: any[] = [];
+            
+            // A. Knowledge Anchors (Brand Context)
+            if (activeKnowledge?.visualAnchors) {
+                activeKnowledge.visualAnchors.forEach(anchor => {
+                    newParts.push({
+                        inlineData: { mimeType: anchor.mimeType, data: anchor.data }
+                    });
+                });
+                if (activeKnowledge.visualAnchors.length > 0) {
+                    newParts.push({ text: "REFERENCED VISUAL ANCHORS (Strict Style & Layout Adherence Required):" });
+                }
+            }
+
+            // B. Source Pixels (Vision Context)
+            if (sourcePixelsBase64) {
+                const base64Clean = sourcePixelsBase64.split(',')[1];
+                newParts.push({
+                    inlineData: { mimeType: 'image/png', data: base64Clean }
+                });
+                newParts.push({ text: "INPUT SOURCE CONTEXT (Visual Representation of the Layers provided in JSON):" });
+            }
+
+            // C. Original Text Prompt
+            newParts.push(...lastMessage.parts);
+            
+            // Apply mutated parts
+            lastMessage.parts = newParts;
+        }
 
         const requestConfig: any = {
             systemInstruction,
@@ -609,6 +676,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
                     generativePrompt: { type: Type.STRING },
                     reasoning: { type: Type.STRING },
                     clearance: { type: Type.BOOLEAN, description: "Set to true when resetting from Generative back to Geometric" },
+                    knowledgeApplied: { type: Type.BOOLEAN, description: "Set to true ONLY if you explicitly used the provided Knowledge/Brand Rules to influence the layout." },
                     overrides: {
                         type: Type.ARRAY,
                         items: {
@@ -631,7 +699,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
                         required: ['allowedBleed', 'violationCount']
                     }
                 },
-                required: ['method', 'suggestedScale', 'anchor', 'generativePrompt', 'reasoning', 'clearance', 'overrides', 'safetyReport']
+                required: ['method', 'suggestedScale', 'anchor', 'generativePrompt', 'reasoning', 'clearance', 'overrides', 'safetyReport', 'knowledgeApplied']
             }
         };
         
@@ -641,7 +709,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
 
         const response = await ai.models.generateContent({
             model: modelConfig.apiModel,
-            contents,
+            contents: apiContents,
             config: requestConfig
         });
 
@@ -650,12 +718,10 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
         // --- PAYLOAD ENRICHMENT: Source Pixel Extraction ---
         // If method is GENERATIVE, we must attach the source reference pixels
         if (json.method === 'GENERATIVE' || json.method === 'HYBRID') {
-             const pixelData = await extractSourcePixels(
-                 sourceData.layers as SerializableLayer[],
-                 sourceData.container.bounds
-             );
-             if (pixelData) {
-                 json.sourceReference = pixelData; // Attach base64 to strategy
+             // We already extracted pixels for the request, reuse them if needed, or re-extract if logic requires pure source
+             // Actually, json.sourceReference expects the base64 string.
+             if (sourcePixelsBase64) {
+                 json.sourceReference = sourcePixelsBase64;
              }
         }
 
@@ -791,6 +857,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
                       key={i} nodeId={id} index={i} state={state} sourceData={getSourceData(i)} targetData={getTargetData(i)}
                       onAnalyze={handleAnalyze} onRefine={handleRefine} onModelChange={handleModelChange}
                       isAnalyzing={!!analyzingInstances[i]} compactMode={instanceCount > 1}
+                      activeKnowledge={activeKnowledge}
                   />
               );
           })}

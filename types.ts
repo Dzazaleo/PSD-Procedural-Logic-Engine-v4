@@ -99,6 +99,7 @@ export interface LayoutStrategy {
   generationAllowed?: boolean; // Master switch for generation strategy
   // Visual Grounding
   sourceReference?: string; // Base64 pixel data of the source container
+  knowledgeApplied?: boolean; // Flag indicating if Knowledge/Rules influenced the decision
 }
 
 export interface TransformedLayer extends SerializableLayer {
