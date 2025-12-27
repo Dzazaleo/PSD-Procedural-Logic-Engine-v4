@@ -100,6 +100,7 @@ export interface LayoutStrategy {
   // Visual Grounding
   sourceReference?: string; // Base64 pixel data of the source container
   knowledgeApplied?: boolean; // Flag indicating if Knowledge/Rules influenced the decision
+  knowledgeMuted?: boolean; // Audit flag: Was knowledge explicitly ignored during this generation?
 }
 
 export interface TransformedLayer extends SerializableLayer {
@@ -197,6 +198,7 @@ export interface AnalystInstanceState {
   chatHistory: ChatMessage[];
   layoutStrategy: LayoutStrategy | null;
   selectedModel: 'gemini-3-flash' | 'gemini-3-pro' | 'gemini-3-pro-thinking';
+  isKnowledgeMuted?: boolean; // Per-instance toggle to ignore global knowledge
 }
 
 export interface PSDNodeData {

@@ -422,6 +422,11 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     setPayloadRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
     setAnalysisRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
     setKnowledgeRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
+    
+    // Lifecycle Force Refresh: 
+    // Increment global version to notify downstream subscribers (like Analyst Node) 
+    // that a dependency (e.g., Knowledge Node) might have been removed.
+    setGlobalVersion(v => v + 1);
   }, []);
 
   const triggerGlobalRefresh = useCallback(() => {

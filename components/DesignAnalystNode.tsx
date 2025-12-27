@@ -4,7 +4,7 @@ import { PSDNodeData, LayoutStrategy, SerializableLayer, ChatMessage, AnalystIns
 import { useProceduralStore } from '../store/ProceduralContext';
 import { getSemanticThemeObject, findLayerByPath } from '../services/psdService';
 import { GoogleGenAI, Type } from "@google/genai";
-import { Brain } from 'lucide-react';
+import { Brain, BrainCircuit, Ban } from 'lucide-react';
 import { Psd } from 'ag-psd';
 
 // Define the exact union type for model keys to match PSDNodeData
@@ -86,6 +86,16 @@ const StrategyCard: React.FC<{ strategy: LayoutStrategy, modelConfig: ModelConfi
                  </div>
              )}
              
+             {/* Ignored/Muted Badge */}
+             {strategy.knowledgeMuted && (
+                 <div className="flex items-center space-x-1.5 p-1 bg-slate-800/50 border border-slate-600 rounded mt-1 opacity-75">
+                     <Ban className="w-3 h-3 text-slate-400" />
+                     <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider line-through decoration-slate-500">
+                         Rules Ignored
+                     </span>
+                 </div>
+             )}
+             
              <div className="grid grid-cols-2 gap-4 mt-1">
                 <div>
                     <span className="block text-slate-500 text-[10px] uppercase tracking-wider">Global Scale</span>
@@ -129,13 +139,14 @@ interface InstanceRowProps {
     onAnalyze: (index: number) => void;
     onRefine: (index: number, text: string) => void;
     onModelChange: (index: number, model: ModelKey) => void;
+    onToggleMute: (index: number) => void;
     isAnalyzing: boolean;
     compactMode: boolean;
     activeKnowledge?: KnowledgeContext | null; // Pass down for visual effect
 }
 
 const InstanceRow: React.FC<InstanceRowProps> = ({ 
-    nodeId, index, state, sourceData, targetData, onAnalyze, onRefine, onModelChange, isAnalyzing, compactMode, activeKnowledge 
+    nodeId, index, state, sourceData, targetData, onAnalyze, onRefine, onModelChange, onToggleMute, isAnalyzing, compactMode, activeKnowledge 
 }) => {
     const [inputText, setInputText] = useState('');
     const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -187,21 +198,45 @@ const InstanceRow: React.FC<InstanceRowProps> = ({
                     <span className={`text-[11px] font-bold tracking-wide uppercase ${theme.text}`}>
                         {targetData?.name || `Instance ${index + 1}`}
                     </span>
+                    {/* Knowledge Override Indicator */}
+                    {activeKnowledge && state.isKnowledgeMuted && (
+                         <span className="flex items-center space-x-1 text-[9px] text-slate-500 font-bold bg-slate-800/50 px-1.5 py-0.5 rounded border border-slate-700/50">
+                             <Ban className="w-2.5 h-2.5" />
+                             <span className="line-through decoration-slate-500">RULES</span>
+                         </span>
+                    )}
                 </div>
                 
-                {/* Model Selector */}
-                <div className="relative">
-                     <select 
-                        value={state.selectedModel}
-                        onChange={(e) => onModelChange(index, e.target.value as ModelKey)}
-                        onClick={(e) => e.stopPropagation()}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        className={`nodrag nopan appearance-none text-[9px] px-2 py-1 pr-4 rounded font-mono font-bold cursor-pointer outline-none border transition-colors duration-300 ${activeModelConfig.badgeClass}`}
-                     >
-                         <option value="gemini-3-flash" className="text-black bg-white">FLASH</option>
-                         <option value="gemini-3-pro" className="text-black bg-white">PRO</option>
-                         <option value="gemini-3-pro-thinking" className="text-black bg-white">DEEP</option>
-                     </select>
+                <div className="flex items-center space-x-2">
+                    {/* Semantic Override Toggle */}
+                    {activeKnowledge && (
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onToggleMute(index); }}
+                            className={`nodrag nopan p-1 rounded transition-colors border ${
+                                state.isKnowledgeMuted 
+                                    ? 'bg-slate-800 text-slate-500 border-slate-700 hover:text-slate-400' 
+                                    : 'bg-teal-900/30 text-teal-400 border-teal-500/30 hover:bg-teal-900/50'
+                            }`}
+                            title={state.isKnowledgeMuted ? "Knowledge Muted (Geometric Mode)" : "Knowledge Active"}
+                        >
+                            {state.isKnowledgeMuted ? <BrainCircuit className="w-3 h-3 opacity-50" /> : <Brain className="w-3 h-3" />}
+                        </button>
+                    )}
+
+                    {/* Model Selector */}
+                    <div className="relative">
+                        <select 
+                            value={state.selectedModel}
+                            onChange={(e) => onModelChange(index, e.target.value as ModelKey)}
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            className={`nodrag nopan appearance-none text-[9px] px-2 py-1 pr-4 rounded font-mono font-bold cursor-pointer outline-none border transition-colors duration-300 ${activeModelConfig.badgeClass}`}
+                        >
+                            <option value="gemini-3-flash" className="text-black bg-white">FLASH</option>
+                            <option value="gemini-3-pro" className="text-black bg-white">PRO</option>
+                            <option value="gemini-3-pro-thinking" className="text-black bg-white">DEEP</option>
+                        </select>
+                    </div>
                 </div>
             </div>
 
@@ -266,10 +301,16 @@ const InstanceRow: React.FC<InstanceRowProps> = ({
                         <div className="flex items-center space-x-2 text-xs text-slate-400 animate-pulse pl-1">
                             <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div>
                             <span>Analyst is thinking...</span>
-                            {activeKnowledge && (
+                            {activeKnowledge && !state.isKnowledgeMuted && (
                                 <span className="text-[9px] text-teal-400 font-bold ml-1 flex items-center gap-1">
                                     <Brain className="w-3 h-3" />
                                     + Rules & Anchors
+                                </span>
+                            )}
+                            {activeKnowledge && state.isKnowledgeMuted && (
+                                <span className="text-[9px] text-slate-500 font-bold ml-1 flex items-center gap-1 line-through decoration-slate-500">
+                                    <Ban className="w-3 h-3" />
+                                    Rules Muted
                                 </span>
                             )}
                         </div>
@@ -470,7 +511,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
     setNodes((nds) => nds.map((n) => {
         if (n.id === id) {
             const currentInstances = n.data.analystInstances || {};
-            const oldState = currentInstances[index] || { chatHistory: [], layoutStrategy: null, selectedModel: 'gemini-3-flash' };
+            const oldState = currentInstances[index] || { chatHistory: [], layoutStrategy: null, selectedModel: 'gemini-3-flash', isKnowledgeMuted: false };
             return {
                 ...n,
                 data: {
@@ -488,6 +529,11 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
 
   const handleModelChange = (index: number, model: ModelKey) => {
       updateInstanceState(index, { selectedModel: model });
+  };
+  
+  const handleToggleMute = (index: number) => {
+      const currentState = analystInstances[index]?.isKnowledgeMuted || false;
+      updateInstanceState(index, { isKnowledgeMuted: !currentState });
   };
 
   // --- AI Logic ---
@@ -595,6 +641,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
         3. Provide the specific 'generativePrompt'.
     `;
     
+    // Knowledge Injection (Only if not null)
     if (knowledgeContext && knowledgeContext.rules) {
         prompt = `[GLOBAL PROJECT KNOWLEDGE - MANDATORY]\n${knowledgeContext.rules}\n\nThe above rules override standard geometric defaults. Ensure 'overrides' and 'method' choices strictly adhere to these constraints.\n\n` + prompt;
     }
@@ -611,9 +658,13 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
       
       if (!sourceData || !targetData) return;
       
-      const instanceState = analystInstances[index] || { selectedModel: 'gemini-3-flash' };
+      const instanceState = analystInstances[index] || { selectedModel: 'gemini-3-flash', isKnowledgeMuted: false };
       const modelConfig = MODELS[instanceState.selectedModel as ModelKey];
       
+      // Resolve Selective Injection (Per-Instance Toggle)
+      const isMuted = instanceState.isKnowledgeMuted || false;
+      const effectiveKnowledge = (!isMuted && activeKnowledge) ? activeKnowledge : null;
+
       setAnalyzingInstances(prev => ({ ...prev, [index]: true }));
 
       try {
@@ -621,7 +672,8 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
         if (!apiKey) throw new Error("API_KEY missing");
 
         const ai = new GoogleGenAI({ apiKey });
-        const systemInstruction = generateSystemInstruction(sourceData, targetData, history.length > 1, activeKnowledge);
+        // Use effectiveKnowledge (null if muted)
+        const systemInstruction = generateSystemInstruction(sourceData, targetData, history.length > 1, effectiveKnowledge);
         
         // --- Multimodal Fusion & Source Vision Injection ---
         // We construct the contents array, and augment the *last* user message to include visual context.
@@ -636,14 +688,14 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
         if (lastMessage.role === 'user') {
             const newParts: any[] = [];
             
-            // A. Knowledge Anchors (Brand Context)
-            if (activeKnowledge?.visualAnchors) {
-                activeKnowledge.visualAnchors.forEach(anchor => {
+            // A. Knowledge Anchors (Brand Context) - ONLY IF NOT MUTED
+            if (effectiveKnowledge?.visualAnchors) {
+                effectiveKnowledge.visualAnchors.forEach(anchor => {
                     newParts.push({
                         inlineData: { mimeType: anchor.mimeType, data: anchor.data }
                     });
                 });
-                if (activeKnowledge.visualAnchors.length > 0) {
+                if (effectiveKnowledge.visualAnchors.length > 0) {
                     newParts.push({ text: "REFERENCED VISUAL ANCHORS (Strict Style & Layout Adherence Required):" });
                 }
             }
@@ -715,14 +767,17 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
 
         const json = JSON.parse(response.text || '{}');
         
-        // --- PAYLOAD ENRICHMENT: Source Pixel Extraction ---
-        // If method is GENERATIVE, we must attach the source reference pixels
+        // --- PAYLOAD ENRICHMENT ---
+        // 1. Source Pixel Extraction
         if (json.method === 'GENERATIVE' || json.method === 'HYBRID') {
-             // We already extracted pixels for the request, reuse them if needed, or re-extract if logic requires pure source
-             // Actually, json.sourceReference expects the base64 string.
              if (sourcePixelsBase64) {
                  json.sourceReference = sourcePixelsBase64;
              }
+        }
+        
+        // 2. Audit Trail: Muted State
+        if (isMuted) {
+            json.knowledgeMuted = true;
         }
 
         const newAiMessage: ChatMessage = {
@@ -851,11 +906,11 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
       </div>
       <div className="flex flex-col">
           {Array.from({ length: instanceCount }).map((_, i) => {
-              const state = analystInstances[i] || { chatHistory: [], layoutStrategy: null, selectedModel: 'gemini-3-flash' };
+              const state = analystInstances[i] || { chatHistory: [], layoutStrategy: null, selectedModel: 'gemini-3-flash', isKnowledgeMuted: false };
               return (
                   <InstanceRow 
                       key={i} nodeId={id} index={i} state={state} sourceData={getSourceData(i)} targetData={getTargetData(i)}
-                      onAnalyze={handleAnalyze} onRefine={handleRefine} onModelChange={handleModelChange}
+                      onAnalyze={handleAnalyze} onRefine={handleRefine} onModelChange={handleModelChange} onToggleMute={handleToggleMute}
                       isAnalyzing={!!analyzingInstances[i]} compactMode={instanceCount > 1}
                       activeKnowledge={activeKnowledge}
                   />
