@@ -29,6 +29,21 @@ export interface TemplateMetadata {
   containers: ContainerDefinition[];
 }
 
+// --- KNOWLEDGE INTEGRATION ---
+export interface VisualAnchor {
+  mimeType: string;
+  data: string; // Base64 pixel data for multimodal injection
+}
+
+export interface KnowledgeContext {
+  sourceNodeId: string;
+  rules: string; // Distilled textual guidelines (PDF/Rules)
+  visualAnchors: VisualAnchor[]; // Visual style references (Mood boards)
+}
+
+export type KnowledgeRegistry = Record<string, KnowledgeContext>;
+// -----------------------------
+
 export interface ContainerContext {
   containerName: string;
   bounds: {
@@ -193,6 +208,7 @@ export interface PSDNodeData {
   targetAssembly?: TargetAssembly | null; // For TargetSplitterNode output
   remapperConfig?: RemapperConfig | null; // For RemapperNode state
   transformedPayload?: TransformedPayload | null; // For RemapperNode output
+  knowledgeContext?: KnowledgeContext | null; // For KnowledgeNode state
   
   // Dynamic State Persistence
   channelCount?: number;

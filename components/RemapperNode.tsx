@@ -235,8 +235,11 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   useEffect(() => {
       const blobs = previousBlobsRef.current;
       return () => {
-          Object.values(blobs).forEach(url => {
-              if (url && url.startsWith('blob:')) URL.revokeObjectURL(url);
+          Object.values(blobs).forEach((url) => {
+              // Ensure url is a string before calling startsWith
+              if (typeof url === 'string' && url.startsWith('blob:')) {
+                  URL.revokeObjectURL(url);
+              }
           });
       };
   }, []);
