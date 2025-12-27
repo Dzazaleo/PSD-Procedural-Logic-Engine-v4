@@ -421,7 +421,13 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     setResolvedRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
     setPayloadRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
     setAnalysisRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
-    setKnowledgeRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
+    
+    // Explicitly clean up Knowledge Registry to ensure stale rules don't persist
+    setKnowledgeRegistry(prev => { 
+        if (!prev[nodeId]) return prev;
+        const { [nodeId]: _, ...rest } = prev; 
+        return rest; 
+    });
     
     // Lifecycle Force Refresh: 
     // Increment global version to notify downstream subscribers (like Analyst Node) 

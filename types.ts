@@ -198,7 +198,7 @@ export interface AnalystInstanceState {
   chatHistory: ChatMessage[];
   layoutStrategy: LayoutStrategy | null;
   selectedModel: 'gemini-3-flash' | 'gemini-3-pro' | 'gemini-3-pro-thinking';
-  isKnowledgeMuted?: boolean; // Per-instance toggle to ignore global knowledge
+  isKnowledgeMuted: boolean; // REQUIRED: Per-instance toggle to ignore global knowledge
 }
 
 export interface PSDNodeData {

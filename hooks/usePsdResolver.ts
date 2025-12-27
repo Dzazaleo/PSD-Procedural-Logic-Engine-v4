@@ -16,12 +16,36 @@ export interface ResolverResult {
   message: string;
 }
 
+// Helper: Deep recursive search for a layer by name
+// Returns the first match found in the tree (pre-order traversal)
+const findLayerDeep = (tree: SerializableLayer[], targetName: string, caseSensitive: boolean): SerializableLayer | null => {
+  for (const layer of tree) {
+    const layerName = layer.name || '';
+    const isMatch = caseSensitive 
+      ? layerName === targetName 
+      : layerName.toLowerCase() === targetName.toLowerCase();
+
+    if (isMatch) {
+      return layer;
+    }
+
+    // Recursive Step
+    if (layer.children && layer.children.length > 0) {
+      const foundInChildren = findLayerDeep(layer.children, targetName, caseSensitive);
+      if (foundInChildren) {
+        return foundInChildren;
+      }
+    }
+  }
+  return null;
+};
+
 /**
  * Hook to resolve a template container name to a matching design layer group.
  * 
  * Encapsulates the logic for:
  * 1. Stripping procedural prefixes (e.g., '!!SYMBOLS' -> 'SYMBOLS')
- * 2. Strict & Case-insensitive matching
+ * 2. Strict & Case-insensitive matching using DEEP RECURSION
  * 3. Hierarchy/Content validation
  */
 export const usePsdResolver = () => {
@@ -61,8 +85,8 @@ export const usePsdResolver = () => {
       };
     }
 
-    // 2. Strict Search (Priority 1)
-    const strictMatch = designTree.find(l => l.name === cleanTargetName);
+    // 2. Strict Deep Search (Priority 1)
+    const strictMatch = findLayerDeep(designTree, cleanTargetName, true);
     
     if (strictMatch) {
        // Content Validation (Rule: Empty Group)
@@ -80,9 +104,9 @@ export const usePsdResolver = () => {
        };
     }
 
-    // 3. Case-Insensitive Search (Priority 2 - Fallback)
-    const lowerTarget = cleanTargetName.toLowerCase();
-    const looseMatch = designTree.find(l => l.name.toLowerCase() === lowerTarget);
+    // 3. Loose Deep Search (Priority 2 - Fallback)
+    // Note: We use cleanTargetName for loose search as well, ignoring case inside the helper.
+    const looseMatch = findLayerDeep(designTree, cleanTargetName, false);
     
     if (looseMatch) {
        if (!looseMatch.children || looseMatch.children.length === 0) {

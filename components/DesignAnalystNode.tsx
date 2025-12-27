@@ -10,6 +10,14 @@ import { Psd } from 'ag-psd';
 // Define the exact union type for model keys to match PSDNodeData
 type ModelKey = 'gemini-3-flash' | 'gemini-3-pro' | 'gemini-3-pro-thinking';
 
+// CONSTANT: Robust Default State for Type Safety
+const DEFAULT_INSTANCE_STATE: AnalystInstanceState = {
+    chatHistory: [],
+    layoutStrategy: null,
+    selectedModel: 'gemini-3-flash',
+    isKnowledgeMuted: false
+};
+
 interface ModelConfig {
   apiModel: string;
   label: string;
@@ -76,7 +84,7 @@ const StrategyCard: React.FC<{ strategy: LayoutStrategy, modelConfig: ModelConfi
                 )}
              </div>
 
-             {/* Knowledge Badge */}
+             {/* Knowledge Badge - Explicit Confirmation */}
              {strategy.knowledgeApplied && (
                  <div className="flex items-center space-x-1.5 p-1 bg-teal-900/30 border border-teal-500/30 rounded mt-1">
                      <Brain className="w-3 h-3 text-teal-400" />
@@ -86,7 +94,7 @@ const StrategyCard: React.FC<{ strategy: LayoutStrategy, modelConfig: ModelConfi
                  </div>
              )}
              
-             {/* Ignored/Muted Badge */}
+             {/* Ignored/Muted Badge - Audit Trail */}
              {strategy.knowledgeMuted && (
                  <div className="flex items-center space-x-1.5 p-1 bg-slate-800/50 border border-slate-600 rounded mt-1 opacity-75">
                      <Ban className="w-3 h-3 text-slate-400" />
@@ -200,7 +208,7 @@ const InstanceRow: React.FC<InstanceRowProps> = ({
                     </span>
                     {/* Knowledge Override Indicator */}
                     {activeKnowledge && state.isKnowledgeMuted && (
-                         <span className="flex items-center space-x-1 text-[9px] text-slate-500 font-bold bg-slate-800/50 px-1.5 py-0.5 rounded border border-slate-700/50">
+                         <span className="flex items-center space-x-1 text-[9px] text-slate-500 font-bold bg-slate-800/50 px-1.5 py-0.5 rounded border border-slate-700/50 ml-2">
                              <Ban className="w-2.5 h-2.5" />
                              <span className="line-through decoration-slate-500">RULES</span>
                          </span>
@@ -215,7 +223,7 @@ const InstanceRow: React.FC<InstanceRowProps> = ({
                             className={`nodrag nopan p-1 rounded transition-colors border ${
                                 state.isKnowledgeMuted 
                                     ? 'bg-slate-800 text-slate-500 border-slate-700 hover:text-slate-400' 
-                                    : 'bg-teal-900/30 text-teal-400 border-teal-500/30 hover:bg-teal-900/50'
+                                    : 'bg-teal-900/30 text-teal-400 border-teal-500/30 hover:bg-teal-900/50 animate-pulse-slow'
                             }`}
                             title={state.isKnowledgeMuted ? "Knowledge Muted (Geometric Mode)" : "Knowledge Active"}
                         >
@@ -445,15 +453,15 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
     for (let i = 0; i < instanceCount; i++) {
         const sourceData = getSourceData(i);
         const targetData = getTargetData(i);
-        const instanceState = analystInstances[i];
+        const instanceState = analystInstances[i] || DEFAULT_INSTANCE_STATE;
 
         if (sourceData) {
-            const history = instanceState?.chatHistory || [];
+            const history = instanceState.chatHistory || [];
             const hasExplicitKeywords = history.some(msg => msg.role === 'user' && /\b(generate|recreate|nano banana)\b/i.test(msg.parts[0].text));
             
             const augmentedContext: MappingContext = {
                 ...sourceData,
-                aiStrategy: instanceState?.layoutStrategy ? {
+                aiStrategy: instanceState.layoutStrategy ? {
                     ...instanceState.layoutStrategy,
                     isExplicitIntent: hasExplicitKeywords
                 } : undefined,
@@ -511,7 +519,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
     setNodes((nds) => nds.map((n) => {
         if (n.id === id) {
             const currentInstances = n.data.analystInstances || {};
-            const oldState = currentInstances[index] || { chatHistory: [], layoutStrategy: null, selectedModel: 'gemini-3-flash', isKnowledgeMuted: false };
+            const oldState = currentInstances[index] || DEFAULT_INSTANCE_STATE;
             return {
                 ...n,
                 data: {
@@ -658,7 +666,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
       
       if (!sourceData || !targetData) return;
       
-      const instanceState = analystInstances[index] || { selectedModel: 'gemini-3-flash', isKnowledgeMuted: false };
+      const instanceState = analystInstances[index] || DEFAULT_INSTANCE_STATE;
       const modelConfig = MODELS[instanceState.selectedModel as ModelKey];
       
       // Resolve Selective Injection (Per-Instance Toggle)
@@ -906,7 +914,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
       </div>
       <div className="flex flex-col">
           {Array.from({ length: instanceCount }).map((_, i) => {
-              const state = analystInstances[i] || { chatHistory: [], layoutStrategy: null, selectedModel: 'gemini-3-flash', isKnowledgeMuted: false };
+              const state = analystInstances[i] || DEFAULT_INSTANCE_STATE;
               return (
                   <InstanceRow 
                       key={i} nodeId={id} index={i} state={state} sourceData={getSourceData(i)} targetData={getTargetData(i)}
