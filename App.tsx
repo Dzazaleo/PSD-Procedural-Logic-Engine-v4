@@ -82,6 +82,7 @@ const initialNodes: Node<PSDNodeData>[] = [
       remapperConfig: { targetContainerName: null },
       instanceCount: 1 // Initial state for persistence
     },
+    style: { width: 500 }
   },
   {
     id: 'node-5',
