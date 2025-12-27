@@ -588,6 +588,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const previousBlobsRef = useRef<Record<number, string>>({});
   const [displayPreviews, setDisplayPreviews] = useState<Record<number, string>>({});
   const isTransitioningRef = useRef<Record<number, boolean>>({});
+  const lastSynthesisSignatures = useRef<Record<number, string>>({});
 
   const { setNodes } = useReactFlow();
   const edges = useEdges();
@@ -1040,6 +1041,39 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         }
     });
   }, [instances, displayPreviews, payloadRegistry, id]);
+
+  // 5. REACTIVE SYNTHESIS LOOP (Debounced Mirror Preview)
+  useEffect(() => {
+    const handler = setTimeout(() => {
+        instances.forEach(instance => {
+            const { index, payload, target } = instance;
+            
+            // Validation: Needs Payload + Bounds + Source Binary
+            if (!payload || !target.bounds || !psdRegistry[payload.sourceNodeId]) return;
+            
+            // Validation: Skip if explicit error state
+            if (payload.status === 'error') return;
+
+            // Signature Generation for Loop Prevention
+            // 1. Layer Transforms (Geometric State)
+            const layersSignature = JSON.stringify(payload.layers.map(l => ({
+                id: l.id, x: l.coords.x, y: l.coords.y, w: l.coords.w, h: l.coords.h, op: l.opacity, v: l.isVisible
+            })));
+            
+            // 2. Generative State (ID) & Target Layout
+            // We use generationId to detect NEW drafts. We do not use previewUrl to avoid recursive loops.
+            const sig = `${layersSignature}|${target.bounds.w}x${target.bounds.h}|${payload.generationId}`;
+            
+            if (lastSynthesisSignatures.current[index] === sig) return;
+            
+            lastSynthesisSignatures.current[index] = sig;
+            
+            compositeInstancePreview(index, payload, target.bounds);
+        });
+    }, 400); // 400ms Debounce
+
+    return () => clearTimeout(handler);
+  }, [instances, psdRegistry, compositeInstancePreview]);
 
   // LAZY SYNTHESIS & MULTI-MODAL GROUNDING & AUTOMATED RESET
   useEffect(() => {
