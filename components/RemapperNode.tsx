@@ -2,6 +2,7 @@ import React, { memo, useMemo, useEffect, useCallback, useState, useRef } from '
 import { Handle, Position, NodeProps, useEdges, useReactFlow, useNodes } from 'reactflow';
 import { PSDNodeData, SerializableLayer, TransformedPayload, TransformedLayer, MAX_BOUNDARY_VIOLATION_PERCENT, LayoutStrategy } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
+import { renderLayerToTarget, findLayerByPath } from '../services/psdService';
 import { GoogleGenAI } from "@google/genai";
 import { Check, Sparkles, Info, Layers, Box, Cpu } from 'lucide-react';
 
@@ -593,7 +594,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const nodes = useNodes();
   
   // Consume data from Store
-  const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, updatePayload, unregisterNode } = useProceduralStore();
+  const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, updatePayload, unregisterNode, psdRegistry, updatePreview } = useProceduralStore();
 
   // GLOBAL GATE: Master Switch from Node Data
   const globalGenerationAllowed = (data as any).remapperConfig?.generationAllowed ?? true;
@@ -689,7 +690,80 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       }));
   }, [id, setNodes]);
 
-  // 3. CONFIRM ACTION
+  // 3. COMPOSITE PREVIEW ACTION (Mirror Preview)
+  const compositeInstancePreview = useCallback(async (
+      index: number,
+      payload: TransformedPayload,
+      targetBounds: { w: number, h: number }
+  ) => {
+      // Check for source binary
+      const sourcePsd = psdRegistry[payload.sourceNodeId];
+      if (!sourcePsd) return;
+
+      // Initialize Canvas
+      const canvas = document.createElement('canvas');
+      canvas.width = targetBounds.w;
+      canvas.height = targetBounds.h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // Helper to load image for Generative Layers
+      const loadImage = (src: string): Promise<HTMLImageElement> => {
+          return new Promise((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => resolve(img);
+              img.onerror = reject;
+              img.src = src;
+          });
+      };
+
+      // Recursive Composite (Painter's Algorithm)
+      const processLayerTree = async (layers: TransformedLayer[]) => {
+          // Iterate Reverse (Bottom-Up)
+          for (let i = layers.length - 1; i >= 0; i--) {
+              const layer = layers[i];
+              if (!layer.isVisible) continue;
+
+              if (layer.children) {
+                  await processLayerTree(layer.children);
+                  continue;
+              }
+
+              if (layer.type === 'generative') {
+                  if (payload.previewUrl) {
+                      try {
+                          const img = await loadImage(payload.previewUrl);
+                          // Draw generative asset at specified coords
+                          ctx.drawImage(img, layer.coords.x, layer.coords.y, layer.coords.w, layer.coords.h);
+                      } catch (err) {
+                          console.warn('Failed to composite generative layer', err);
+                      }
+                  }
+              } else {
+                  // Geometric Layer
+                  const sourceLayer = findLayerByPath(sourcePsd, layer.id);
+                  if (sourceLayer) {
+                      const prevAlpha = ctx.globalAlpha;
+                      ctx.globalAlpha = layer.opacity;
+                      renderLayerToTarget(sourceLayer, ctx, layer);
+                      ctx.globalAlpha = prevAlpha;
+                  }
+              }
+          }
+      };
+
+      await processLayerTree(payload.layers);
+
+      const compositeUrl = canvas.toDataURL('image/png');
+
+      // Update Local Optimistic State
+      setDisplayPreviews(prev => ({ ...prev, [index]: compositeUrl }));
+
+      // Update Store
+      updatePreview(id, `result-out-${index}`, compositeUrl);
+  }, [psdRegistry, id, updatePreview]);
+
+  // 4. CONFIRM ACTION
   const handleConfirmGeneration = useCallback((index: number, prompt: string, confirmedUrl?: string) => {
       if (!confirmedUrl) return;
 
