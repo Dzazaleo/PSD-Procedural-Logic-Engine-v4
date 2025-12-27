@@ -598,6 +598,8 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
                 name: l.name,
                 type: l.type,
                 depth: depth,
+                isVisible: l.isVisible,
+                opacity: l.opacity,
                 relX: (l.coords.x - sourceData.container.bounds.x) / sourceW,
                 relY: (l.coords.y - sourceData.container.bounds.y) / sourceH,
                 width: l.coords.w,
@@ -611,30 +613,37 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
     const layerAnalysisData = flattenLayers(sourceData.layers as SerializableLayer[]);
 
     let prompt = `
-        ROLE: Precision Drafting Engine & Senior PSD Compositor.
-        GOAL: Perform "Geometry-First Semantic Recomposition" using a STRICT GRID SYSTEM.
-        
+        ROLE: Omniscient Layout Engine & Semantic Compositor.
+        GOAL: Analyze the FULL hierarchy of ${layerAnalysisData.length} layers to determine a global geometric transform that fits the content into the Target Container.
+
         CONTAINER CONTEXT:
         - Source: ${sourceData.container.containerName} (${sourceW}x${sourceH})
         - Target: ${targetData.name} (${targetW}x${targetH})
-        
-        LAYER HIERARCHY (JSON):
-        ${JSON.stringify(layerAnalysisData.slice(0, 40))} ... (Truncated)
+        - Target Aspect Ratio: ${(targetW/targetH).toFixed(2)}
+        - Source Aspect Ratio: ${(sourceW/sourceH).toFixed(2)}
 
-        CRITICAL GRID LOGIC:
-        1. Analyze the Target Aspect Ratio (${(targetW/targetH).toFixed(2)}) vs Source (${(sourceW/sourceH).toFixed(2)}).
-        2. If Target is narrower/taller, STACK elements vertically.
-        3. If Target is wider, distribute horizontally.
-        4. Calculate integer 'yOffset' and 'xOffset' relative to Target Top-Left (0,0).
-        5. Maintain visual hierarchy: Key elements (Titles) must be prominent.
+        FULL LAYER HIERARCHY (JSON):
+        ${JSON.stringify(layerAnalysisData)} 
 
-        DECISION MATRIX (Strict Enforcement):
-        - METHOD 'GEOMETRIC': Default. Use purely geometric transforms (scale/translate). 'generativePrompt' MUST be empty string "".
-        - METHOD 'GENERATIVE': Use ONLY if user explicitly requests (e.g., "generate", "create", "nano banana") OR if aspect ratio mismatch is > 2.0.
-          IF GENERATIVE IS SELECTED:
-          - Set 'generativePrompt' to: "Generate a high-fidelity expansion. Use the attached sourceReference for style, lighting, and texture matching. Do not deviate from the original aesthetic."
-        - METHOD 'HYBRID': Use geometric layout for main elements but generate background fill.
-        
+        BASELINE PROTOCOL (Global Constants):
+        1. 'suggestedScale': A single global scale factor applied to the ENTIRE container to fit it within the target.
+        2. 'anchor': The gravitational point (TOP, CENTER, BOTTOM, STRETCH) for the global fit.
+        3. By default, all layers inherit this global scale and anchor.
+
+        OVERRIDE INTENT (Semantic Deviations):
+        - You may generate an 'overrides' array to deviate specific layers from the global baseline.
+        - ONLY override a layer if its semantic role (e.g., a "WIN" button, a specific character, or a UI badge) specifically requires a different scale or position to maintain visual hierarchy.
+        - Do NOT override layers just to fill space if the global scale is sufficient.
+
+        SPATIAL REASONING:
+        - Analyze the collection of assets. ensure that the global scale does NOT cause critical content (like text or faces) to bleed off the target boundary.
+        - If the aspect ratios differ significantly, prioritize fitting the content safely over filling every pixel.
+
+        DECISION MATRIX:
+        - METHOD 'GEOMETRIC': Default. Pure math. No AI generation.
+        - METHOD 'GENERATIVE': Only if user asks explicitly.
+        - METHOD 'HYBRID': Geometric layout + Generative fill.
+
         PIVOT PROTOCOL (Geometric Reset):
         If the user requests to "undo generation", "reset", "use original pixels", "stop generating", or if the strategy is GEOMETRIC:
         1. Set 'method' to 'GEOMETRIC'.
