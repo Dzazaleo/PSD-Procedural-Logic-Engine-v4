@@ -3,7 +3,7 @@ import { Handle, Position, NodeProps, useEdges, useReactFlow, useNodes } from 'r
 import { PSDNodeData, SerializableLayer, TransformedPayload, TransformedLayer, MAX_BOUNDARY_VIOLATION_PERCENT, LayoutStrategy } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { GoogleGenAI } from "@google/genai";
-import { ChevronLeft, ChevronRight, Check, Sparkles, Info, X } from 'lucide-react';
+import { Check, Sparkles, Info, Layers, Box, Cpu } from 'lucide-react';
 
 interface InstanceData {
   index: number;
@@ -31,13 +31,9 @@ interface InstanceData {
 interface OverlayProps {
     previewUrl?: string | null;
     canonicalUrl?: string | null; // The URL currently locked in the store
-    history?: string[];
-    activeHistoryIndex?: number;
-    hasDraft?: boolean;
     isGenerating: boolean;
     scale: number;
     onConfirm: (url?: string) => void;
-    onSeek: (direction: number) => void;
     isStoreConfirmed: boolean; // The confirmation state of the store payload
     targetDimensions?: { w: number, h: number };
     sourceReference?: string;
@@ -48,11 +44,8 @@ interface OverlayProps {
 const GenerativePreviewOverlay = ({ 
     previewUrl, 
     canonicalUrl,
-    history = [],
-    activeHistoryIndex,
     isGenerating,
     onConfirm,
-    onSeek,
     isStoreConfirmed,
     targetDimensions,
     sourceReference,
@@ -61,20 +54,12 @@ const GenerativePreviewOverlay = ({
 }: OverlayProps) => {
     const { w, h } = targetDimensions || { w: 1, h: 1 };
     
-    // Calculate timeline bounds
-    const maxIndex = history.length;
-    const currentIndex = activeHistoryIndex !== undefined ? activeHistoryIndex : maxIndex;
-    const isLatest = currentIndex === maxIndex;
-    const hasHistory = history.length > 0;
-
     // STRICT CONFIRMATION LOGIC:
     // A view is confirmed ONLY if it matches the store's canonical URL AND the store is confirmed.
-    // This handles history navigation: if you look at an old image, it is NOT confirmed, even if the store is.
     const isCurrentViewConfirmed = !!previewUrl && !!canonicalUrl && previewUrl === canonicalUrl && isStoreConfirmed;
 
     // Button Visibility:
     // Show 'Confirm' if the current view is NOT the confirmed one.
-    // This allows "Restoring" history (by confirming an old URL) or "Confirming" a new draft.
     const showConfirmButton = !!previewUrl && !isCurrentViewConfirmed && !isGenerating;
 
     return (
@@ -133,7 +118,7 @@ const GenerativePreviewOverlay = ({
                          <button 
                             onClick={(e) => { e.stopPropagation(); onConfirm(previewUrl!); }}
                             className="bg-indigo-600/90 hover:bg-indigo-500 text-white p-1.5 rounded shadow-[0_4px_10px_rgba(0,0,0,0.3)] border border-white/20 transform hover:scale-105 active:scale-95 transition-all flex items-center space-x-1.5 backdrop-blur-[2px]"
-                            title={isLatest ? "Commit this draft" : "Restore this version"}
+                            title="Commit this draft"
                          >
                             <span className="text-[9px] font-bold uppercase tracking-wider leading-none">
                                 Confirm
@@ -149,7 +134,7 @@ const GenerativePreviewOverlay = ({
                             ? 'bg-emerald-900/80 text-emerald-200 border-emerald-500/50' 
                             : 'bg-purple-900/80 text-purple-200 border-purple-500/50'
                         }`}>
-                         {isCurrentViewConfirmed ? 'CONFIRMED' : !isLatest ? `HISTORY ${currentIndex + 1}/${maxIndex + 1}` : 'PREVIEW'}
+                         {isCurrentViewConfirmed ? 'CONFIRMED' : 'PREVIEW'}
                      </span>
                      {isGenerating && (
                          <span className="flex h-1.5 w-1.5 relative">
@@ -160,35 +145,6 @@ const GenerativePreviewOverlay = ({
                  </div>
              </div>
              
-             {hasHistory && (
-                 <div className="w-full flex items-center justify-between px-2 py-1 bg-black/40 border-t border-white/5">
-                     <button 
-                         onClick={(e) => { e.stopPropagation(); onSeek(-1); }}
-                         disabled={currentIndex === 0}
-                         className={`p-1 rounded hover:bg-white/10 transition-colors ${currentIndex === 0 ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'}`}
-                     >
-                         <ChevronLeft size={12} />
-                     </button>
-                     
-                     <div className="flex space-x-1">
-                         {Array.from({ length: maxIndex }).map((_, i) => (
-                             <div 
-                                key={i} 
-                                className={`w-1 h-1 rounded-full transition-colors ${i === currentIndex ? 'bg-purple-400' : 'bg-slate-600'}`}
-                             />
-                         ))}
-                     </div>
-
-                     <button 
-                         onClick={(e) => { e.stopPropagation(); onSeek(1); }}
-                         disabled={currentIndex >= maxIndex}
-                         className={`p-1 rounded hover:bg-white/10 transition-colors ${currentIndex >= maxIndex ? 'text-slate-600 cursor-not-allowed' : 'text-slate-300'}`}
-                     >
-                         <ChevronRight size={12} />
-                     </button>
-                 </div>
-             )}
-
              <style>{`
                @keyframes scan-y {
                  0% { top: 0%; opacity: 0; }
@@ -332,22 +288,23 @@ const OverrideInspector = ({
     );
 };
 
-// --- HELPER: Process Breakdown Calculation ---
-const calculateProcessCounts = (layers: TransformedLayer[], overrideIds: Set<string>) => {
-  let geometric = 0;
+// --- HELPER: Process Breakdown Audit ---
+const getLayerAudit = (layers: TransformedLayer[]) => {
+  let pixel = 0;
+  let group = 0;
   let generative = 0;
-  let overrides = 0;
 
   const traverse = (nodes: TransformedLayer[]) => {
     for (const node of nodes) {
       if (node.type === 'generative') {
         generative++;
+      } else if (node.type === 'group') {
+        group++;
       } else {
-        geometric++;
-        if (overrideIds.has(node.id)) {
-          overrides++;
-        }
+        // type === 'layer'
+        pixel++;
       }
+      
       if (node.children) {
         traverse(node.children);
       }
@@ -355,7 +312,7 @@ const calculateProcessCounts = (layers: TransformedLayer[], overrideIds: Set<str
   };
 
   traverse(layers);
-  return { geometric, generative, overrides };
+  return { pixel, group, generative, total: pixel + group + generative };
 };
 
 // --- SUB-COMPONENT: Instance Row (Extracted) ---
@@ -363,7 +320,6 @@ const RemapperInstanceRow = memo(({
     instance, 
     confirmations, 
     toggleInstanceGeneration, 
-    seekHistory, 
     handleConfirmGeneration, 
     handleImageLoad, 
     isGeneratingPreview, 
@@ -375,7 +331,6 @@ const RemapperInstanceRow = memo(({
     instance: InstanceData, 
     confirmations: Record<number, string>, 
     toggleInstanceGeneration: (idx: number) => void, 
-    seekHistory: (nodeId: string, handle: string, dir: number) => void, 
     handleConfirmGeneration: (idx: number, prompt: string, url?: string) => void, 
     handleImageLoad: (idx: number) => void, 
     isGeneratingPreview: Record<number, boolean>, 
@@ -390,7 +345,6 @@ const RemapperInstanceRow = memo(({
     const isAwaiting = instance.payload?.status === 'awaiting_confirmation';
     const currentPrompt = instance.source.aiStrategy?.generativePrompt;
     const confirmedPrompt = confirmations[instance.index];
-    const isConfirmed = !!currentPrompt && currentPrompt === confirmedPrompt;
     const refinementPending = !!confirmedPrompt && !!currentPrompt && confirmedPrompt !== currentPrompt;
     
     // LOGIC GATE CHECK for UI
@@ -401,9 +355,6 @@ const RemapperInstanceRow = memo(({
 
     // Fetch History directly from Store Payload (Source of Truth for Navigation)
     const storePayload = payloadRegistry[id]?.[`result-out-${instance.index}`];
-    const history = storePayload?.history || [];
-    const activeIndex = storePayload?.activeHistoryIndex;
-    const latestDraft = storePayload?.latestDraftUrl;
     const persistedPreview = storePayload?.previewUrl;
     const storeIsSynthesizing = storePayload?.isSynthesizing;
     const storeConfirmed = storePayload?.isConfirmed;
@@ -415,12 +366,11 @@ const RemapperInstanceRow = memo(({
 
     const hasOverrides = instance.source.aiStrategy?.overrides && instance.source.aiStrategy.overrides.length > 0;
 
-    // Process Breakdown Stats
-    const processStats = useMemo(() => {
+    // Process Breakdown Stats (Audit)
+    const audit = useMemo(() => {
         if (!instance.payload?.layers) return null;
-        const overrideIds = new Set(instance.source.aiStrategy?.overrides?.map(o => o.layerId) || []);
-        return calculateProcessCounts(instance.payload.layers, overrideIds);
-    }, [instance.payload?.layers, instance.source.aiStrategy]);
+        return getLayerAudit(instance.payload.layers);
+    }, [instance.payload?.layers]);
 
     return (
         <div className="relative p-3 border-b border-slate-700/50 bg-slate-800 space-y-3 hover:bg-slate-700/20 transition-colors first:rounded-t-none">
@@ -521,40 +471,41 @@ const RemapperInstanceRow = memo(({
                                   <span className="text-[8px] bg-slate-700 text-slate-400 px-1 rounded border border-slate-600">AI MUTED</span>
                               )}
                           </div>
-                          <span className="text-[10px] text-slate-400 font-mono">{instance.payload.scaleFactor.toFixed(2)}x Scale</span>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                              {audit ? `${audit.total} Nodes • ` : ''}
+                              {instance.payload.scaleFactor.toFixed(2)}x Scale
+                          </span>
                       </div>
                       
                       <div className={`w-full h-1 rounded overflow-hidden mt-1 ${instance.strategyUsed ? 'bg-pink-900' : 'bg-slate-900'}`}>
                          <div className={`h-full ${instance.strategyUsed ? 'bg-pink-500' : 'bg-emerald-500'}`} style={{ width: '100%' }}></div>
                       </div>
 
-                      {/* Process Summary Breakdown */}
-                      {processStats && (
-                          <div className="flex flex-wrap gap-2 mt-2">
-                              {/* Geometric Count */}
+                      {/* Detailed Process Audit Breakdown */}
+                      {audit && (
+                          <div className="flex flex-wrap gap-2 mt-2 select-none">
+                              {/* Pixel Layers */}
                               <div className="px-2 py-0.5 rounded border border-emerald-500/30 bg-emerald-900/20 flex items-center space-x-1.5">
-                                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>
+                                  <Layers className="w-3 h-3 text-emerald-400" />
                                   <span className="text-[9px] text-emerald-300 font-mono font-medium">
-                                      {processStats.geometric} Layers Remapped
+                                      {audit.pixel} Pixel Layers
                                   </span>
                               </div>
                               
-                              {/* Generative Count */}
-                              {processStats.generative > 0 && (
-                                  <div className="px-2 py-0.5 rounded border border-purple-500/30 bg-purple-900/20 flex items-center space-x-1.5">
-                                      <div className="w-1.5 h-1.5 rounded-full bg-purple-400"></div>
-                                      <span className="text-[9px] text-purple-300 font-mono font-medium">
-                                          {processStats.generative} Layers Synthesized
-                                      </span>
-                                  </div>
-                              )}
+                              {/* Groups */}
+                              <div className="px-2 py-0.5 rounded border border-slate-600 bg-slate-700/40 flex items-center space-x-1.5">
+                                  <Box className="w-3 h-3 text-slate-400" />
+                                  <span className="text-[9px] text-slate-300 font-mono font-medium">
+                                      {audit.group} Groups
+                                  </span>
+                              </div>
 
-                              {/* Semantic Overrides Count */}
-                              {processStats.overrides > 0 && (
-                                  <div className="px-2 py-0.5 rounded border border-pink-500/30 bg-pink-900/20 flex items-center space-x-1.5">
-                                      <div className="w-1.5 h-1.5 rounded-full bg-pink-400"></div>
-                                      <span className="text-[9px] text-pink-300 font-mono font-medium">
-                                          {processStats.overrides} Semantic Adjustments
+                              {/* AI Synthetic */}
+                              {audit.generative > 0 && (
+                                  <div className="px-2 py-0.5 rounded border border-purple-500/30 bg-purple-900/20 flex items-center space-x-1.5">
+                                      <Cpu className="w-3 h-3 text-purple-400" />
+                                      <span className="text-[9px] text-purple-300 font-mono font-medium">
+                                          {audit.generative} AI Synthetic
                                       </span>
                                   </div>
                               )}
@@ -588,13 +539,9 @@ const RemapperInstanceRow = memo(({
                               <GenerativePreviewOverlay 
                                   previewUrl={effectivePreview}
                                   canonicalUrl={persistedPreview}
-                                  history={history}
-                                  activeHistoryIndex={activeIndex}
-                                  hasDraft={!!latestDraft}
                                   isGenerating={isEffectiveGenerating}
                                   scale={instance.payload.scaleFactor}
                                   onConfirm={(url) => handleConfirmGeneration(instance.index, instance.source.aiStrategy?.generativePrompt || '', url)}
-                                  onSeek={(direction) => seekHistory(id, `result-out-${instance.index}`, direction)}
                                   isStoreConfirmed={!!storeConfirmed}
                                   targetDimensions={instance.source.targetDimensions || instance.target.bounds}
                                   sourceReference={iterativeSource}
@@ -646,7 +593,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const nodes = useNodes();
   
   // Consume data from Store
-  const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, updatePayload, seekHistory, unregisterNode } = useProceduralStore();
+  const { templateRegistry, resolvedRegistry, payloadRegistry, registerPayload, updatePayload, unregisterNode } = useProceduralStore();
 
   // GLOBAL GATE: Master Switch from Node Data
   const globalGenerationAllowed = (data as any).remapperConfig?.generationAllowed ?? true;
@@ -959,9 +906,6 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
               sourceReference: sourceData.aiStrategy?.sourceReference,
               // METADATA PRESERVATION from Store
               generationId: storePayload?.generationId,
-              history: storePayload?.history,
-              activeHistoryIndex: storePayload?.activeHistoryIndex,
-              latestDraftUrl: storePayload?.latestDraftUrl,
               isSynthesizing: storePayload?.isSynthesizing,
               // PROPAGATE GATE STATE (Crucial for Store logic to act on)
               generationAllowed: effectiveAllowed 
@@ -1173,7 +1117,6 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                 instance={instance}
                 confirmations={confirmations}
                 toggleInstanceGeneration={toggleInstanceGeneration}
-                seekHistory={seekHistory}
                 handleConfirmGeneration={handleConfirmGeneration}
                 handleImageLoad={handleImageLoad}
                 isGeneratingPreview={isGeneratingPreview}

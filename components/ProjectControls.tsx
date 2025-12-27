@@ -25,7 +25,6 @@ export const ProjectControls = () => {
                         transformedPayload: {
                             ...node.data.transformedPayload,
                             previewUrl: undefined, // Remove generated preview blob/base64
-                            history: undefined     // Remove history stack
                         }
                     }
                 };

@@ -34,7 +34,6 @@ interface ProceduralContextType extends ProceduralState {
   registerAnalysis: (nodeId: string, handleId: string, strategy: LayoutStrategy) => void;
   registerKnowledge: (nodeId: string, context: KnowledgeContext) => void;
   updatePreview: (nodeId: string, handleId: string, url: string) => void;
-  seekHistory: (nodeId: string, handleId: string, direction: number) => void; 
   unregisterNode: (nodeId: string) => void;
   triggerGlobalRefresh: () => void;
 }
@@ -42,7 +41,7 @@ interface ProceduralContextType extends ProceduralState {
 const ProceduralContext = createContext<ProceduralContextType | null>(null);
 
 // --- HELPER: Reconcile Terminal State ---
-// Implements "Double-Buffer" Update Strategy + Stale Guard + Geometric Preservation + History Loop + Logic Gate
+// Implements "Double-Buffer" Update Strategy + Stale Guard + Geometric Preservation + Logic Gate
 const reconcileTerminalState = (
     incomingPayload: TransformedPayload, 
     currentPayload: TransformedPayload | undefined
@@ -56,13 +55,10 @@ const reconcileTerminalState = (
             ...incomingPayload,
             // Destructive Strip:
             previewUrl: undefined,
-            history: [],
-            activeHistoryIndex: 0,
             isConfirmed: false,
             isTransient: false,
             isSynthesizing: false,
             requiresGeneration: false, // Ensure downstream nodes know generation is off
-            latestDraftUrl: undefined,
             // Preserve geometric data
             metrics: incomingPayload.metrics,
             // Visually remove any layers marked as generative
@@ -82,8 +78,6 @@ const reconcileTerminalState = (
         return {
              ...incomingPayload,
              previewUrl: undefined,
-             history: [],
-             activeHistoryIndex: 0,
              isConfirmed: false,
              isTransient: false,
              isSynthesizing: false
@@ -97,7 +91,6 @@ const reconcileTerminalState = (
             isSynthesizing: true,
             // Preserve visual context during load
             previewUrl: currentPayload?.previewUrl,
-            history: currentPayload?.history || [],
             sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
             targetContainer: incomingPayload.targetContainer || currentPayload?.targetContainer || '',
             metrics: incomingPayload.metrics || currentPayload?.metrics,
@@ -106,30 +99,7 @@ const reconcileTerminalState = (
         };
     }
 
-    // 4. HISTORY ACCUMULATION & FILL PHASE
-    let nextHistory = currentPayload?.history || [];
-    const currentUrl = currentPayload?.previewUrl;
-    const incomingUrl = incomingPayload.previewUrl;
-
-    // Detect if we have a new valid image that warrants a history entry
-    const isNewImage = incomingUrl && incomingUrl !== currentUrl;
-    
-    if (isNewImage) {
-        if (currentUrl) {
-            // Push previous state to history
-            // Deduplicate: only push if strictly different from last history item
-            const lastItem = nextHistory.length > 0 ? nextHistory[nextHistory.length - 1] : null;
-            if (lastItem !== currentUrl) {
-                nextHistory = [...nextHistory, currentUrl];
-            }
-            // Buffer Limit: Keep last 5
-            if (nextHistory.length > 5) {
-                nextHistory = nextHistory.slice(-5);
-            }
-        }
-    }
-
-    // 5. REFINEMENT PERSISTENCE (State Guard)
+    // 4. REFINEMENT PERSISTENCE (State Guard)
     // Prevent accidental reset of confirmation if prompt hasn't changed structurally
     let isConfirmed = incomingPayload.isConfirmed ?? currentPayload?.isConfirmed ?? false;
     
@@ -138,15 +108,12 @@ const reconcileTerminalState = (
         isConfirmed = false;
     }
 
-    // 6. GEOMETRIC PRESERVATION
+    // 5. GEOMETRIC PRESERVATION
     // If this is a layout update (no generationId) but we have AI assets, keep them.
     if (!incomingPayload.generationId && currentPayload?.generationId) {
          return {
             ...incomingPayload,
             previewUrl: currentPayload.previewUrl,
-            history: currentPayload.history,
-            activeHistoryIndex: currentPayload.activeHistoryIndex,
-            latestDraftUrl: currentPayload.latestDraftUrl,
             generationId: currentPayload.generationId,
             isSynthesizing: currentPayload.isSynthesizing,
             isConfirmed: currentPayload.isConfirmed, 
@@ -156,12 +123,9 @@ const reconcileTerminalState = (
          };
     }
 
-    // 7. FINAL CONSTRUCTION
+    // 6. FINAL CONSTRUCTION
     return {
         ...incomingPayload,
-        history: nextHistory,
-        // Use incoming index if provided (navigation), else default to current view (latest)
-        activeHistoryIndex: incomingPayload.activeHistoryIndex ?? nextHistory.length,
         isConfirmed,
         sourceReference: incomingPayload.sourceReference || currentPayload?.sourceReference,
         generationId: incomingPayload.generationId || currentPayload?.generationId,
@@ -256,33 +220,12 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
       }
 
       // APPLY RECONCILIATION MIDDLEWARE
-      // This enforces logic gates, history, and state transitions
+      // This enforces logic gates and state transitions
       const reconciledPayload = reconcileTerminalState(effectivePayload, currentPayload);
 
       // Deep equality check optimization
       if (currentPayload && JSON.stringify(currentPayload) === JSON.stringify(reconciledPayload)) {
           return prev;
-      }
-
-      // CHECK FOR NON-BILLABLE DRAFT REFRESH (Event Emission)
-      if (currentPayload) {
-          const isPreviewChanged = currentPayload.previewUrl !== reconciledPayload.previewUrl;
-          const isStructureStable = 
-              currentPayload.status === reconciledPayload.status &&
-              currentPayload.requiresGeneration === reconciledPayload.requiresGeneration;
-
-          if (isPreviewChanged && isStructureStable) {
-               const event = new CustomEvent('payload-updated', { 
-                   detail: { 
-                       nodeId, 
-                       handleId, 
-                       type: 'DRAFT_REFRESH',
-                       isBillable: false,
-                       newPreviewUrl: reconciledPayload.previewUrl
-                   } 
-               });
-               setTimeout(() => window.dispatchEvent(event), 0);
-          }
       }
 
       return { 
@@ -373,48 +316,6 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     });
   }, []);
 
-  const seekHistory = useCallback((nodeId: string, handleId: string, direction: number) => {
-    setPayloadRegistry(prev => {
-        const nodeRecord = prev[nodeId];
-        if (!nodeRecord) return prev;
-        const payload = nodeRecord[handleId];
-        if (!payload) return prev;
-        
-        const history = payload.history || [];
-        const maxIndex = history.length;
-        
-        const currentIndex = payload.activeHistoryIndex !== undefined ? payload.activeHistoryIndex : maxIndex;
-        const nextIndex = Math.max(0, Math.min(currentIndex + direction, maxIndex));
-        
-        if (nextIndex === currentIndex) return prev;
-        
-        let viewUrl: string | undefined;
-        let isConfirmed = payload.isConfirmed;
-
-        if (nextIndex < history.length) {
-            viewUrl = history[nextIndex];
-            isConfirmed = false;
-        } 
-        
-        if (!viewUrl && nextIndex === history.length) {
-             return prev;
-        }
-
-        return {
-            ...prev,
-            [nodeId]: {
-                ...nodeRecord,
-                [handleId]: {
-                    ...payload,
-                    activeHistoryIndex: nextIndex,
-                    previewUrl: viewUrl || payload.previewUrl,
-                    isConfirmed: isConfirmed
-                }
-            }
-        };
-    });
-  }, []);
-
   const unregisterNode = useCallback((nodeId: string) => {
     setPsdRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
     setTemplateRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
@@ -455,12 +356,11 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     registerAnalysis,
     registerKnowledge,
     updatePreview,
-    seekHistory,
     unregisterNode,
     triggerGlobalRefresh
   }), [
     psdRegistry, templateRegistry, resolvedRegistry, payloadRegistry, analysisRegistry, knowledgeRegistry, globalVersion,
-    registerPsd, registerTemplate, registerResolved, registerPayload, updatePayload, registerAnalysis, registerKnowledge, updatePreview, seekHistory,
+    registerPsd, registerTemplate, registerResolved, registerPayload, updatePayload, registerAnalysis, registerKnowledge, updatePreview,
     unregisterNode, triggerGlobalRefresh
   ]);
 
