@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import { Psd } from 'ag-psd';
-import { TemplateMetadata, MappingContext, TransformedPayload, LayoutStrategy } from '../types';
+import { TemplateMetadata, MappingContext, TransformedPayload, LayoutStrategy, KnowledgeContext, KnowledgeRegistry } from '../types';
 
 interface ProceduralState {
   // Maps NodeID -> Raw PSD Object (Binary/Structure)
@@ -18,6 +18,9 @@ interface ProceduralState {
   // Maps NodeID -> HandleID -> LayoutStrategy (AI Analysis)
   analysisRegistry: Record<string, Record<string, LayoutStrategy>>;
 
+  // Maps NodeID -> KnowledgeContext (Global Design Rules)
+  knowledgeRegistry: KnowledgeRegistry;
+
   // Global counter to force re-evaluation of downstream nodes upon binary re-hydration
   globalVersion: number;
 }
@@ -29,6 +32,7 @@ interface ProceduralContextType extends ProceduralState {
   registerPayload: (nodeId: string, handleId: string, payload: TransformedPayload, masterOverride?: boolean) => void;
   updatePayload: (nodeId: string, handleId: string, partial: Partial<TransformedPayload>) => void; 
   registerAnalysis: (nodeId: string, handleId: string, strategy: LayoutStrategy) => void;
+  registerKnowledge: (nodeId: string, context: KnowledgeContext) => void;
   updatePreview: (nodeId: string, handleId: string, url: string) => void;
   seekHistory: (nodeId: string, handleId: string, direction: number) => void; 
   unregisterNode: (nodeId: string) => void;
@@ -171,6 +175,7 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
   const [resolvedRegistry, setResolvedRegistry] = useState<Record<string, Record<string, MappingContext>>>({});
   const [payloadRegistry, setPayloadRegistry] = useState<Record<string, Record<string, TransformedPayload>>>({});
   const [analysisRegistry, setAnalysisRegistry] = useState<Record<string, Record<string, LayoutStrategy>>>({});
+  const [knowledgeRegistry, setKnowledgeRegistry] = useState<KnowledgeRegistry>({});
   const [globalVersion, setGlobalVersion] = useState<number>(0);
 
   const registerPsd = useCallback((nodeId: string, psd: Psd) => {
@@ -337,6 +342,14 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     });
   }, []);
 
+  const registerKnowledge = useCallback((nodeId: string, context: KnowledgeContext) => {
+    setKnowledgeRegistry(prev => {
+        if (prev[nodeId] === context) return prev;
+        if (JSON.stringify(prev[nodeId]) === JSON.stringify(context)) return prev;
+        return { ...prev, [nodeId]: context };
+    });
+  }, []);
+
   const updatePreview = useCallback((nodeId: string, handleId: string, url: string) => {
     setPayloadRegistry(prev => {
       const nodeRecord = prev[nodeId];
@@ -408,6 +421,7 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     setResolvedRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
     setPayloadRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
     setAnalysisRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
+    setKnowledgeRegistry(prev => { const { [nodeId]: _, ...rest } = prev; return rest; });
   }, []);
 
   const triggerGlobalRefresh = useCallback(() => {
@@ -420,6 +434,7 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     resolvedRegistry,
     payloadRegistry,
     analysisRegistry,
+    knowledgeRegistry,
     globalVersion,
     registerPsd,
     registerTemplate,
@@ -427,13 +442,14 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
     registerPayload,
     updatePayload, 
     registerAnalysis,
+    registerKnowledge,
     updatePreview,
     seekHistory,
     unregisterNode,
     triggerGlobalRefresh
   }), [
-    psdRegistry, templateRegistry, resolvedRegistry, payloadRegistry, analysisRegistry, globalVersion,
-    registerPsd, registerTemplate, registerResolved, registerPayload, updatePayload, registerAnalysis, updatePreview, seekHistory,
+    psdRegistry, templateRegistry, resolvedRegistry, payloadRegistry, analysisRegistry, knowledgeRegistry, globalVersion,
+    registerPsd, registerTemplate, registerResolved, registerPayload, updatePayload, registerAnalysis, registerKnowledge, updatePreview, seekHistory,
     unregisterNode, triggerGlobalRefresh
   ]);
 
