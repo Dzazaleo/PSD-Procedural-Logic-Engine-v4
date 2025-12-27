@@ -1,8 +1,8 @@
 import React, { memo, useCallback, useState, useEffect, useRef } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
 import { useProceduralStore } from '../store/ProceduralContext';
-import { PSDNodeData } from '../types';
-import { BookOpen, Image as ImageIcon, FileText, Trash2, UploadCloud, BrainCircuit, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import { PSDNodeData, VisualAnchor } from '../types';
+import { BookOpen, Image as ImageIcon, FileText, Trash2, UploadCloud, BrainCircuit, Loader2, CheckCircle2, AlertCircle, X, Layers } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 
 // Initialize PDF Worker from CDN to handle parsing off the main thread
@@ -16,6 +16,7 @@ interface StagedFile {
   // Parsing Lifecycle State
   status: 'idle' | 'parsing' | 'complete' | 'error';
   extractedText?: string;
+  visualAnchor?: VisualAnchor;
   errorMsg?: string;
 }
 
@@ -58,6 +59,59 @@ const extractTextFromPdf = async (file: File): Promise<string> => {
     }
 };
 
+const optimizeImage = (file: File): Promise<VisualAnchor> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const img = new Image();
+            img.onload = () => {
+                const MAX_DIM = 512;
+                let w = img.width;
+                let h = img.height;
+
+                // Scale down logic while preserving aspect ratio
+                if (w > h) {
+                    if (w > MAX_DIM) {
+                        h *= MAX_DIM / w;
+                        w = MAX_DIM;
+                    }
+                } else {
+                    if (h > MAX_DIM) {
+                        w *= MAX_DIM / h;
+                        h = MAX_DIM;
+                    }
+                }
+
+                const canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                if (!ctx) {
+                    reject(new Error("Canvas context failed"));
+                    return;
+                }
+                
+                // Draw and optimize
+                ctx.drawImage(img, 0, 0, w, h);
+                
+                // Export as JPEG with 0.8 quality to reduce token usage
+                const mimeType = 'image/jpeg';
+                const dataUrl = canvas.toDataURL(mimeType, 0.8);
+                const base64 = dataUrl.split(',')[1];
+                
+                resolve({
+                    mimeType,
+                    data: base64
+                });
+            };
+            img.onerror = () => reject(new Error("Failed to load image for optimization"));
+            img.src = e.target?.result as string;
+        };
+        reader.onerror = () => reject(new Error("Failed to read image file"));
+        reader.readAsDataURL(file);
+    });
+};
+
 export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -85,7 +139,7 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     if (!files) return;
 
     const newStaged: StagedFile[] = [];
-    const extractionQueue: StagedFile[] = [];
+    const processingQueue: StagedFile[] = [];
 
     Array.from(files).forEach((file) => {
       // Validate types
@@ -100,11 +154,11 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
           file,
           type: isPdf ? 'pdf' : 'image',
           preview: isImage ? URL.createObjectURL(file) : undefined,
-          status: isPdf ? 'parsing' : 'complete' // Images are instant
+          status: 'parsing' // Start in parsing/optimizing state for both
         };
         
         newStaged.push(staged);
-        if (isPdf) extractionQueue.push(staged);
+        processingQueue.push(staged);
       }
     });
 
@@ -113,23 +167,33 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     // 1. Update UI immediately
     setStagedFiles(prev => [...prev, ...newStaged]);
 
-    // 2. Process Extraction Queue (PDFs)
-    extractionQueue.forEach(async (item) => {
+    // 2. Process Queue (PDFs & Images)
+    processingQueue.forEach(async (item) => {
         try {
-            const text = await extractTextFromPdf(item.file);
-            
-            // Success Update
-            setStagedFiles(prev => prev.map(f => {
-                if (f.id === item.id) {
-                    return { ...f, status: 'complete', extractedText: text };
-                }
-                return f;
-            }));
+            if (item.type === 'pdf') {
+                const text = await extractTextFromPdf(item.file);
+                // Success Update for PDF
+                setStagedFiles(prev => prev.map(f => {
+                    if (f.id === item.id) {
+                        return { ...f, status: 'complete', extractedText: text };
+                    }
+                    return f;
+                }));
+            } else if (item.type === 'image') {
+                const anchor = await optimizeImage(item.file);
+                // Success Update for Image
+                setStagedFiles(prev => prev.map(f => {
+                    if (f.id === item.id) {
+                        return { ...f, status: 'complete', visualAnchor: anchor };
+                    }
+                    return f;
+                }));
+            }
         } catch (err: any) {
             // Error Update
             setStagedFiles(prev => prev.map(f => {
                 if (f.id === item.id) {
-                    return { ...f, status: 'error', errorMsg: "Parsing Failed" };
+                    return { ...f, status: 'error', errorMsg: "Processing Failed" };
                 }
                 return f;
             }));
@@ -156,6 +220,9 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         return prev.filter(f => f.id !== fileId);
     });
   };
+
+  // Derived state for the Visual Anchor Gallery
+  const completedVisualAnchors = stagedFiles.filter(f => f.type === 'image' && f.status === 'complete' && f.visualAnchor && f.preview);
 
   return (
     <div className="w-[300px] bg-slate-900 rounded-lg shadow-2xl border border-teal-500/50 font-sans flex flex-col overflow-hidden">
@@ -204,7 +271,7 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         </div>
 
         {/* Staged Assets List */}
-        <div className="space-y-1 max-h-48 overflow-y-auto custom-scrollbar">
+        <div className="space-y-1 max-h-32 overflow-y-auto custom-scrollbar border-b border-slate-700/50 pb-2">
             {stagedFiles.length === 0 ? (
                 <div className="text-[10px] text-slate-600 text-center italic py-2">
                     No knowledge assets staged.
@@ -235,9 +302,14 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                     <span className="text-[8px] text-slate-500 uppercase tracking-wider">
                                         {file.type} • {(file.file.size / 1024).toFixed(0)}KB
                                     </span>
-                                    {file.extractedText && (
+                                    {file.type === 'pdf' && file.extractedText && (
                                         <span className="text-[8px] text-teal-500 font-mono" title="Characters Extracted">
                                             [{file.extractedText.length} chars]
+                                        </span>
+                                    )}
+                                    {file.type === 'image' && file.status === 'complete' && (
+                                        <span className="text-[8px] text-teal-500 font-mono" title="Optimized">
+                                            [OPT]
                                         </span>
                                     )}
                                 </div>
@@ -270,6 +342,41 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                 ))
             )}
         </div>
+
+        {/* Visual Reference Anchors Gallery */}
+        {completedVisualAnchors.length > 0 && (
+            <div className="flex flex-col space-y-2">
+                <div className="flex items-center justify-between">
+                    <span className="text-[9px] uppercase text-teal-400 font-bold tracking-wider flex items-center gap-1">
+                        <Layers className="w-3 h-3" /> Visual Reference Anchors
+                    </span>
+                    <span className="text-[9px] text-slate-500 font-mono">{completedVisualAnchors.length} Ready</span>
+                </div>
+                
+                <div className="flex overflow-x-auto gap-2 pb-2 custom-scrollbar">
+                    {completedVisualAnchors.map(file => (
+                        <div key={file.id} className="relative group shrink-0 w-16 h-16 rounded border border-slate-700 bg-black/20 overflow-hidden shadow-sm hover:border-teal-500/50 transition-colors">
+                            <img 
+                                src={file.preview} 
+                                alt="Visual Anchor" 
+                                className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" 
+                            />
+                            {/* Overlay Badge */}
+                            <div className="absolute top-0 right-0 bg-teal-500 text-white text-[7px] font-bold px-1 rounded-bl leading-none shadow-sm">
+                                REF
+                            </div>
+                            {/* Remove Overlay */}
+                            <button
+                                onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
+                                className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                                <X className="w-5 h-5 text-white/80 hover:text-white drop-shadow-md" />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        )}
         
         {/* Distillation Status / Controls (Placeholder for Phase 3) */}
         {stagedFiles.length > 0 && (
