@@ -28,7 +28,7 @@ interface InstanceData {
   strategyUsed?: boolean;
 }
 
-// --- SUB-COMPONENT: Generative Preview Overlay ---
+// --- SUB-COMPONENT: Universal Preview Overlay ---
 interface OverlayProps {
     previewUrl?: string | null;
     canonicalUrl?: string | null; // The URL currently locked in the store
@@ -39,7 +39,8 @@ interface OverlayProps {
     targetDimensions?: { w: number, h: number };
     sourceReference?: string;
     onImageLoad?: () => void;
-    generationId?: number; 
+    generationId?: number;
+    method?: string; // NEW: To display status badge
 }
 
 const GenerativePreviewOverlay = ({ 
@@ -51,7 +52,8 @@ const GenerativePreviewOverlay = ({
     targetDimensions,
     sourceReference,
     onImageLoad,
-    generationId
+    generationId,
+    method = 'GEOMETRIC'
 }: OverlayProps) => {
     const { w, h } = targetDimensions || { w: 1, h: 1 };
     
@@ -60,11 +62,35 @@ const GenerativePreviewOverlay = ({
     const isCurrentViewConfirmed = !!previewUrl && !!canonicalUrl && previewUrl === canonicalUrl && isStoreConfirmed;
 
     // Button Visibility:
-    // Show 'Confirm' if the current view is NOT the confirmed one.
+    // Show 'Confirm' if the current view is NOT the confirmed one AND it's a generative/hybrid method.
+    // Geometric mirrors are auto-confirmed by nature (deterministic), so we can hide the manual confirm button for them usually,
+    // but the prompt implies universal behavior. However, confirming a geometric layout essentially locks it.
+    // For universal WYSIWYG, we allow locking any state.
     const showConfirmButton = !!previewUrl && !isCurrentViewConfirmed && !isGenerating;
+    
+    // Status Badge Logic
+    let statusColor = 'bg-slate-900/80 text-slate-200 border-slate-500/50';
+    let statusLabel = 'PREVIEW';
+    
+    if (isGenerating) {
+        statusColor = 'bg-purple-900/80 text-purple-200 border-purple-500/50';
+        statusLabel = 'SYNTHESIZING...';
+    } else if (method === 'GENERATIVE') {
+        statusColor = isCurrentViewConfirmed 
+            ? 'bg-purple-900/80 text-purple-200 border-purple-500/50' 
+            : 'bg-indigo-900/80 text-indigo-200 border-indigo-500/50';
+        statusLabel = isCurrentViewConfirmed ? 'GENERATIVE LOCKED' : 'AI DRAFT';
+    } else if (method === 'HYBRID') {
+        statusColor = 'bg-pink-900/80 text-pink-200 border-pink-500/50';
+        statusLabel = 'HYBRID COMPOSITE';
+    } else {
+        // GEOMETRIC
+        statusColor = 'bg-emerald-900/80 text-emerald-200 border-emerald-500/50';
+        statusLabel = 'GEOMETRIC MIRROR';
+    }
 
     return (
-        <div className={`relative w-full mt-2 rounded-md overflow-hidden bg-slate-900/50 border transition-all duration-500 flex justify-center flex-col items-center ${isGenerating ? 'border-indigo-500/30' : 'border-purple-500/50'}`}>
+        <div className={`relative w-full mt-2 rounded-md overflow-hidden bg-slate-900/50 border transition-all duration-500 flex justify-center flex-col items-center ${isGenerating ? 'border-indigo-500/30' : 'border-slate-700/50'}`}>
              <div 
                 className="relative w-full max-w-full flex items-center justify-center overflow-hidden group shadow-inner bg-black/20"
                 style={{
@@ -72,7 +98,7 @@ const GenerativePreviewOverlay = ({
                     maxHeight: '280px'
                 }}
              >
-                 {sourceReference && (
+                 {sourceReference && method !== 'GEOMETRIC' && (
                      <div className="absolute top-2 left-2 z-20 flex flex-col items-start group/source pointer-events-none">
                         <div className="bg-black/60 backdrop-blur-md border border-white/20 p-0.5 rounded shadow-xl transition-transform transform group-hover/source:scale-150 origin-top-left">
                              <img 
@@ -91,18 +117,14 @@ const GenerativePreviewOverlay = ({
                      <img 
                         src={previewUrl} 
                         onLoad={onImageLoad}
-                        alt="AI Ghost" 
-                        key={generationId} // Force remount on new generation for instant update
-                        className={`w-full h-full object-contain transition-all duration-700 
-                            ${isCurrentViewConfirmed 
-                                ? 'opacity-100 grayscale-0 mix-blend-normal' 
-                                : 'opacity-100 grayscale-0 mix-blend-normal'
-                            }`}
+                        alt="Composite Preview" 
+                        key={generationId || 'geometric'} 
+                        className="w-full h-full object-contain transition-all duration-700 opacity-100"
                      />
                  ) : (
                      <div className="absolute inset-0 flex items-center justify-center z-0">
-                         <div className="text-[9px] text-purple-400/50 font-mono text-center px-4 animate-pulse">
-                             {isGenerating ? 'SYNTHESIZING GHOST...' : 'INITIALIZING PREVIEW...'}
+                         <div className="text-[9px] text-slate-500 font-mono text-center px-4 animate-pulse">
+                             {isGenerating ? 'SYNTHESIZING...' : 'RENDERING COMPOSITE...'}
                          </div>
                      </div>
                  )}
@@ -113,13 +135,13 @@ const GenerativePreviewOverlay = ({
                      </div>
                  )}
 
-                 {/* ACTION UTILITY BAR: Standardized Confirmation */}
+                 {/* ACTION UTILITY BAR */}
                  {showConfirmButton && (
                      <div className="absolute top-2 right-2 z-40 flex flex-col items-end transition-opacity duration-300 opacity-100">
                          <button 
                             onClick={(e) => { e.stopPropagation(); onConfirm(previewUrl!); }}
                             className="bg-indigo-600/90 hover:bg-indigo-500 text-white p-1.5 rounded shadow-[0_4px_10px_rgba(0,0,0,0.3)] border border-white/20 transform hover:scale-105 active:scale-95 transition-all flex items-center space-x-1.5 backdrop-blur-[2px]"
-                            title="Commit this draft"
+                            title="Commit this state"
                          >
                             <span className="text-[9px] font-bold uppercase tracking-wider leading-none">
                                 Confirm
@@ -130,12 +152,8 @@ const GenerativePreviewOverlay = ({
                  )}
 
                  <div className="absolute bottom-2 left-2 z-20 flex items-center space-x-2 pointer-events-none">
-                     <span className={`text-[8px] px-1.5 py-0.5 rounded border backdrop-blur-sm shadow-[0_0_8px_rgba(0,0,0,0.5)]
-                        ${isCurrentViewConfirmed
-                            ? 'bg-emerald-900/80 text-emerald-200 border-emerald-500/50' 
-                            : 'bg-purple-900/80 text-purple-200 border-purple-500/50'
-                        }`}>
-                         {isCurrentViewConfirmed ? 'CONFIRMED' : 'PREVIEW'}
+                     <span className={`text-[8px] px-1.5 py-0.5 rounded border backdrop-blur-sm shadow-[0_0_8px_rgba(0,0,0,0.5)] ${statusColor}`}>
+                         {statusLabel}
                      </span>
                      {isGenerating && (
                          <span className="flex h-1.5 w-1.5 relative">
@@ -342,17 +360,9 @@ const RemapperInstanceRow = memo(({
 }) => {
     const [isInspectorOpen, setInspectorOpen] = useState(false);
 
-    const hasPreview = !!instance.payload?.previewUrl;
-    const isAwaiting = instance.payload?.status === 'awaiting_confirmation';
-    const currentPrompt = instance.source.aiStrategy?.generativePrompt;
-    const confirmedPrompt = confirmations[instance.index];
-    const refinementPending = !!confirmedPrompt && !!currentPrompt && confirmedPrompt !== currentPrompt;
-    
-    // LOGIC GATE CHECK for UI
-    const effectiveAllowed = instance.payload?.generationAllowed ?? true;
-    
-    // Only show overlay if AI is allowed
-    const showOverlay = effectiveAllowed && (hasPreview || isAwaiting || refinementPending);
+    // Universal Logic Gate: If we have a payload and no error, show the overlay.
+    // This allows Geometric composites to be visualized as first-class citizens.
+    const showOverlay = !!instance.payload && instance.payload.status !== 'error';
 
     // Fetch History directly from Store Payload (Source of Truth for Navigation)
     const storePayload = payloadRegistry[id]?.[`result-out-${instance.index}`];
@@ -366,12 +376,16 @@ const RemapperInstanceRow = memo(({
     const isEffectiveGenerating = !!isGeneratingPreview[instance.index] || !!storeIsSynthesizing;
 
     const hasOverrides = instance.source.aiStrategy?.overrides && instance.source.aiStrategy.overrides.length > 0;
+    const currentMethod = instance.source.aiStrategy?.method || 'GEOMETRIC';
 
     // Process Breakdown Stats (Audit)
     const audit = useMemo(() => {
         if (!instance.payload?.layers) return null;
         return getLayerAudit(instance.payload.layers);
     }, [instance.payload?.layers]);
+
+    // LOGIC GATE CHECK for UI controls
+    const effectiveAllowed = instance.payload?.generationAllowed ?? true;
 
     return (
         <div className="relative p-3 border-b border-slate-700/50 bg-slate-800 space-y-3 hover:bg-slate-700/20 transition-colors first:rounded-t-none">
@@ -525,18 +539,6 @@ const RemapperInstanceRow = memo(({
                       
                       {showOverlay && (
                           <div className="mt-2 p-2 bg-slate-900/50 border border-slate-700 rounded flex flex-col space-y-2">
-                              {isAwaiting && (
-                                   <span className="text-[9px] text-yellow-200 font-medium leading-tight">
-                                       ⚠️ High procedural distortion.
-                                   </span>
-                              )}
-                              {refinementPending && (
-                                  <div className="flex items-center space-x-1.5 p-1.5 bg-indigo-900/40 border border-indigo-500/30 rounded mb-1 animate-pulse">
-                                      <svg className="w-3 h-3 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                                      <span className="text-[9px] text-indigo-200 font-medium leading-none">Refinement detected. Re-confirm to apply.</span>
-                                  </div>
-                              )}
-                              
                               <GenerativePreviewOverlay 
                                   previewUrl={effectivePreview}
                                   canonicalUrl={persistedPreview}
@@ -548,6 +550,7 @@ const RemapperInstanceRow = memo(({
                                   sourceReference={iterativeSource}
                                   onImageLoad={() => handleImageLoad(instance.index)}
                                   generationId={storePayload?.generationId}
+                                  method={currentMethod}
                               />
                           </div>
                       )}
@@ -1101,13 +1104,8 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         const hasPreview = !!(storePayload?.previewUrl);
         const needsInitialPreview = isAwaiting && hasPrompt && !hasPreview;
 
-        // GEOMETRIC RESET: If strategy changed to geometric, clear previews
-        if (strategy?.method === 'GEOMETRIC') {
-             if (hasPreview || storePayload?.isConfirmed) {
-                 updatePayload(id, `result-out-${idx}`, { previewUrl: undefined, isConfirmed: false, isTransient: false });
-             }
-             return;
-        }
+        // GEOMETRIC RESET BLOCK REMOVED FOR UNIVERSAL WYSIWYG
+        // The geometric preview is now handled by the main synthesis loop above.
 
         // AUTOMATED REFINEMENT RESET
         const lockedPrompt = confirmations[idx];

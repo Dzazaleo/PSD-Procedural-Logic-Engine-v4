@@ -176,18 +176,8 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
             } : undefined,
             generationAllowed: false
         };
-    } else if (context.aiStrategy?.method === 'GEOMETRIC') {
-        sanitizedContext = {
-            ...context,
-            // Flush Ghost Preview
-            previewUrl: undefined,
-            // Flush Generative Intent
-            aiStrategy: {
-                ...context.aiStrategy,
-                generativePrompt: ''
-            }
-        };
-    }
+    } 
+    // PRESERVE GEOMETRIC PREVIEWS: Removed the GEOMETRIC reset block here to allow non-generative composites to persist.
 
     setResolvedRegistry(prev => {
       const nodeRecord = prev[nodeId] || {};
