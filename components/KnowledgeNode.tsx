@@ -2,14 +2,61 @@ import React, { memo, useCallback, useState, useEffect, useRef } from 'react';
 import { Handle, Position, NodeProps } from 'reactflow';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { PSDNodeData } from '../types';
-import { BookOpen, Image as ImageIcon, FileText, Trash2, UploadCloud, BrainCircuit } from 'lucide-react';
+import { BookOpen, Image as ImageIcon, FileText, Trash2, UploadCloud, BrainCircuit, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Initialize PDF Worker from CDN to handle parsing off the main thread
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs';
 
 interface StagedFile {
   id: string;
   file: File;
   type: 'pdf' | 'image';
   preview?: string;
+  // Parsing Lifecycle State
+  status: 'idle' | 'parsing' | 'complete' | 'error';
+  extractedText?: string;
+  errorMsg?: string;
 }
+
+const extractTextFromPdf = async (file: File): Promise<string> => {
+    try {
+        const arrayBuffer = await file.arrayBuffer();
+        
+        // Load the PDF document
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        
+        let fullText = '';
+        const CHAR_LIMIT = 10000; // Safety Cap for Context Window
+
+        // Iterate through all pages
+        for (let i = 1; i <= pdf.numPages; i++) {
+            if (fullText.length >= CHAR_LIMIT) break;
+
+            const page = await pdf.getPage(i);
+            const textContent = await page.getTextContent();
+            
+            // Extract and join text items
+            const pageText = textContent.items.map((item: any) => item.str).join(' ');
+            fullText += pageText + '\n\n';
+        }
+
+        // Sanitization: Remove excessive whitespace
+        fullText = fullText.replace(/\s+/g, ' ').trim();
+
+        // Enforce Limits
+        if (fullText.length > CHAR_LIMIT) {
+            fullText = fullText.substring(0, CHAR_LIMIT) + '... [TRUNCATED]';
+        }
+
+        return fullText;
+
+    } catch (error) {
+        console.error("PDF Extraction Failed:", error);
+        throw new Error("Failed to parse PDF content.");
+    }
+};
 
 export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
@@ -38,6 +85,7 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     if (!files) return;
 
     const newStaged: StagedFile[] = [];
+    const extractionQueue: StagedFile[] = [];
 
     Array.from(files).forEach((file) => {
       // Validate types
@@ -45,17 +93,48 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       const isImage = file.type.startsWith('image/');
 
       if (isPdf || isImage) {
+        const stagedId = `${file.name}-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+        
         const staged: StagedFile = {
-          id: `${file.name}-${Date.now()}`,
+          id: stagedId,
           file,
           type: isPdf ? 'pdf' : 'image',
-          preview: isImage ? URL.createObjectURL(file) : undefined
+          preview: isImage ? URL.createObjectURL(file) : undefined,
+          status: isPdf ? 'parsing' : 'complete' // Images are instant
         };
+        
         newStaged.push(staged);
+        if (isPdf) extractionQueue.push(staged);
       }
     });
 
+    if (newStaged.length === 0) return;
+
+    // 1. Update UI immediately
     setStagedFiles(prev => [...prev, ...newStaged]);
+
+    // 2. Process Extraction Queue (PDFs)
+    extractionQueue.forEach(async (item) => {
+        try {
+            const text = await extractTextFromPdf(item.file);
+            
+            // Success Update
+            setStagedFiles(prev => prev.map(f => {
+                if (f.id === item.id) {
+                    return { ...f, status: 'complete', extractedText: text };
+                }
+                return f;
+            }));
+        } catch (err: any) {
+            // Error Update
+            setStagedFiles(prev => prev.map(f => {
+                if (f.id === item.id) {
+                    return { ...f, status: 'error', errorMsg: "Parsing Failed" };
+                }
+                return f;
+            }));
+        }
+    });
   }, []);
 
   const onDrop = useCallback((e: React.DragEvent) => {
@@ -134,6 +213,7 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                 stagedFiles.map(file => (
                     <div key={file.id} className="flex items-center justify-between p-2 bg-slate-900/50 border border-slate-700 rounded group hover:border-teal-500/30 transition-colors">
                         <div className="flex items-center space-x-2 overflow-hidden">
+                            {/* Icon / Preview */}
                             {file.type === 'pdf' ? (
                                 <FileText className="w-4 h-4 text-orange-400 shrink-0" />
                             ) : (
@@ -145,22 +225,47 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                                     )}
                                 </div>
                             )}
-                            <div className="flex flex-col overflow-hidden">
+
+                            {/* Info */}
+                            <div className="flex flex-col overflow-hidden min-w-[120px]">
                                 <span className="text-[10px] text-slate-300 truncate font-medium" title={file.file.name}>
                                     {file.file.name}
                                 </span>
-                                <span className="text-[8px] text-slate-500 uppercase tracking-wider">
-                                    {file.type} • {(file.file.size / 1024).toFixed(0)}KB
-                                </span>
+                                <div className="flex items-center space-x-1">
+                                    <span className="text-[8px] text-slate-500 uppercase tracking-wider">
+                                        {file.type} • {(file.file.size / 1024).toFixed(0)}KB
+                                    </span>
+                                    {file.extractedText && (
+                                        <span className="text-[8px] text-teal-500 font-mono" title="Characters Extracted">
+                                            [{file.extractedText.length} chars]
+                                        </span>
+                                    )}
+                                </div>
                             </div>
                         </div>
                         
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
-                            className="text-slate-600 hover:text-red-400 p-1 rounded transition-colors opacity-0 group-hover:opacity-100"
-                        >
-                            <Trash2 className="w-3 h-3" />
-                        </button>
+                        {/* Status / Actions */}
+                        <div className="flex items-center space-x-2">
+                            {/* Status Icons */}
+                            {file.status === 'parsing' && (
+                                <Loader2 className="w-3 h-3 text-teal-400 animate-spin" />
+                            )}
+                            {file.status === 'complete' && (
+                                <CheckCircle2 className="w-3 h-3 text-teal-500" />
+                            )}
+                            {file.status === 'error' && (
+                                <div title={file.errorMsg}>
+                                    <AlertCircle className="w-3 h-3 text-red-400" />
+                                </div>
+                            )}
+
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
+                                className="text-slate-600 hover:text-red-400 p-1 rounded transition-colors opacity-0 group-hover:opacity-100"
+                            >
+                                <Trash2 className="w-3 h-3" />
+                            </button>
+                        </div>
                     </div>
                 ))
             )}
