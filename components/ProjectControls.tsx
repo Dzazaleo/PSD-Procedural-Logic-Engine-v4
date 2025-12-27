@@ -10,27 +10,33 @@ export const ProjectControls = () => {
     const onSave = () => {
         const flow = toObject();
         
-        // PERSISTENCE EXCLUSION: Strip transient "AI Ghost" images (base64) from JSON
-        // This ensures the saved file remains lightweight (~KB instead of MBs)
+        // PERSISTENCE LOGIC:
+        // 1. Strip transient "AI Ghost" images (large base64 previews) from Remapper nodes to keep JSON lightweight.
+        // 2. PRESERVE "KnowledgeContext" in Knowledge nodes (contains distilled rules + optimized visual anchors).
+        //    This ensures the "Project Brain" is portable.
+        
         const sanitizedNodes = flow.nodes.map(node => {
+            // Rule 1: Sanitize Remapper Payloads (Transient AI drafts)
             if (node.data && node.data.transformedPayload) {
-                // Clone the data structure to safely mutate the copy
                 return {
                     ...node,
                     data: {
                         ...node.data,
                         transformedPayload: {
                             ...node.data.transformedPayload,
-                            previewUrl: undefined, // Remove current binary data
-                            history: undefined     // Remove history binary data
+                            previewUrl: undefined, // Remove generated preview blob/base64
+                            history: undefined     // Remove history stack
                         }
                     }
                 };
             }
+            
+            // Rule 2: Explicitly preserve Knowledge Context (Implicit behavior, documented for clarity)
+            // node.data.knowledgeContext is NOT stripped, preserving visualAnchors (512px optimized) and rules.
+
             return node;
         });
         
-        // Wrap the sanitized flow object into our ProjectExport schema
         const projectData: ProjectExport = {
             version: '1.0.0',
             timestamp: Date.now(),
@@ -38,10 +44,6 @@ export const ProjectControls = () => {
             edges: flow.edges,
             viewport: flow.viewport
         };
-        
-        // The 'data' in our nodes consists of SerializableLayer and Metadata, which are JSON-safe.
-        // The heavy PSD binary data resides in the ProceduralStore (Context), not in the node state, 
-        // so it is naturally excluded here, keeping the file size small.
         
         const jsonString = JSON.stringify(projectData, null, 2);
         const blob = new Blob([jsonString], { type: 'application/json' });
@@ -82,11 +84,11 @@ export const ProjectControls = () => {
                     const project = rawData as ProjectExport;
 
                     // Apply React Flow State
+                    // This triggers the re-hydration effects in individual nodes (e.g., KnowledgeNode)
                     setNodes(project.nodes);
                     setEdges(project.edges);
                     setViewport(project.viewport);
 
-                    // Optional: Check version compatibility
                     if (project.version !== '1.0.0') {
                         console.warn(`Version mismatch: Loading project version ${project.version} into runtime 1.0.0`);
                     }

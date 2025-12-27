@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useState, useEffect, useRef } from 'react';
-import { Handle, Position, NodeProps } from 'reactflow';
+import { Handle, Position, NodeProps, useReactFlow } from 'reactflow';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { PSDNodeData, VisualAnchor, KnowledgeContext } from '../types';
 import { BookOpen, Image as ImageIcon, FileText, Trash2, UploadCloud, BrainCircuit, Loader2, CheckCircle2, AlertCircle, X, Layers, RefreshCw } from 'lucide-react';
@@ -11,7 +11,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://esm.sh/pdfjs-dist@4.0.379/buil
 
 interface StagedFile {
   id: string;
-  file: File;
+  file?: File; // Optional now, as persisted items don't have File objects
   type: 'pdf' | 'image';
   preview?: string;
   // Parsing Lifecycle State
@@ -121,11 +121,24 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { registerKnowledge, unregisterNode } = useProceduralStore();
+  const { setNodes } = useReactFlow();
 
   // Cleanup on unmount
   useEffect(() => {
     return () => unregisterNode(id);
   }, [id, unregisterNode]);
+
+  // RE-HYDRATION LOGIC
+  useEffect(() => {
+    // If we have data from a loaded project (persisted context) but haven't synced yet...
+    if (data.knowledgeContext && !lastSynced) {
+        console.log(`[KnowledgeNode] Re-hydrating context for ${id}`);
+        
+        // 1. Broadcast to Store immediately so Analyst nodes see it
+        registerKnowledge(id, data.knowledgeContext);
+        setLastSynced(Date.now());
+    }
+  }, [data.knowledgeContext, id, registerKnowledge, lastSynced]);
 
   // Handle Drag Events
   const onDragOver = useCallback((e: React.DragEvent) => {
@@ -167,37 +180,27 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
 
     if (newStaged.length === 0) return;
 
-    // 1. Update UI immediately
     setStagedFiles(prev => [...prev, ...newStaged]);
 
-    // 2. Process Queue (PDFs & Images)
     processingQueue.forEach(async (item) => {
+        if (!item.file) return;
         try {
             if (item.type === 'pdf') {
                 const text = await extractTextFromPdf(item.file);
-                // Success Update for PDF
                 setStagedFiles(prev => prev.map(f => {
-                    if (f.id === item.id) {
-                        return { ...f, status: 'complete', extractedText: text };
-                    }
+                    if (f.id === item.id) return { ...f, status: 'complete', extractedText: text };
                     return f;
                 }));
             } else if (item.type === 'image') {
                 const anchor = await optimizeImage(item.file);
-                // Success Update for Image
                 setStagedFiles(prev => prev.map(f => {
-                    if (f.id === item.id) {
-                        return { ...f, status: 'complete', visualAnchor: anchor };
-                    }
+                    if (f.id === item.id) return { ...f, status: 'complete', visualAnchor: anchor };
                     return f;
                 }));
             }
         } catch (err: any) {
-            // Error Update
             setStagedFiles(prev => prev.map(f => {
-                if (f.id === item.id) {
-                    return { ...f, status: 'error', errorMsg: "Processing Failed" };
-                }
+                if (f.id === item.id) return { ...f, status: 'error', errorMsg: "Processing Failed" };
                 return f;
             }));
         }
@@ -212,7 +215,6 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     processFiles(e.target.files);
-    // Reset input to allow re-selecting same file
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -222,17 +224,16 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         if (target?.preview) URL.revokeObjectURL(target.preview);
         return prev.filter(f => f.id !== fileId);
     });
-    // Invalidate sync status
+    // Invalidate sync status implies modification
     setLastSynced(null);
   };
 
   const distillKnowledge = async () => {
     setIsDistilling(true);
     try {
-        // 1. Aggregate Content
         const rawText = stagedFiles
-            .filter(f => f.type === 'pdf' && f.extractedText)
-            .map(f => `--- SOURCE: ${f.file.name} ---\n${f.extractedText}`)
+            .filter(f => f.type === 'pdf' && f.extractedText && f.file)
+            .map(f => `--- SOURCE: ${f.file!.name} ---\n${f.extractedText}`)
             .join('\n\n');
 
         const visualAnchors = stagedFiles
@@ -241,7 +242,6 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
 
         let finalRules = "";
 
-        // 2. AI Distillation (if text exists)
         if (rawText.trim().length > 0) {
             const apiKey = process.env.API_KEY;
             if (apiKey) {
@@ -270,20 +270,30 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         } else if (visualAnchors.length > 0) {
             finalRules = "Adhere to the visual style, color palette, and spatial rhythm of the attached reference images.";
         } else {
-             // No content
              setIsDistilling(false);
              return; 
         }
 
-        // 3. Broadcast to Store
         const context: KnowledgeContext = {
             sourceNodeId: id,
             rules: finalRules,
             visualAnchors: visualAnchors
         };
 
+        // 1. Broadcast to Store
         registerKnowledge(id, context);
         setLastSynced(Date.now());
+
+        // 2. Persist to Node Data (Critical for Save/Load)
+        setNodes((nds) => nds.map((n) => {
+            if (n.id === id) {
+                return {
+                    ...n,
+                    data: { ...n.data, knowledgeContext: context }
+                };
+            }
+            return n;
+        }));
 
     } catch (e) {
         console.error("Distillation error", e);
@@ -292,9 +302,26 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
     }
   };
 
-  // Derived state for the Visual Anchor Gallery
-  const completedVisualAnchors = stagedFiles.filter(f => f.type === 'image' && f.status === 'complete' && f.visualAnchor && f.preview);
-  const hasContent = stagedFiles.some(f => f.status === 'complete');
+  // derived state for the UI
+  // If we have local staged files, show them.
+  // If local is empty but we have persisted context (re-hydration), display persisted anchors.
+  const hasLocalStaged = stagedFiles.length > 0;
+  const persistedAnchors = data.knowledgeContext?.visualAnchors || [];
+  
+  // Create unified display anchors
+  const displayAnchors = hasLocalStaged 
+    ? stagedFiles.filter(f => f.type === 'image' && f.status === 'complete' && f.visualAnchor && f.preview).map(f => ({
+        id: f.id,
+        preview: f.preview!,
+        isPersisted: false
+    }))
+    : persistedAnchors.map((anchor, i) => ({
+        id: `persisted-${i}`,
+        preview: `data:${anchor.mimeType};base64,${anchor.data}`, // Reconstruct blob URL
+        isPersisted: true
+    }));
+
+  const hasContent = hasLocalStaged || persistedAnchors.length > 0 || (stagedFiles.some(f => f.type === 'pdf' && f.status === 'complete'));
   const isSyncActive = !!lastSynced;
 
   return (
@@ -350,89 +377,83 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
 
         {/* Staged Assets List */}
         <div className="space-y-1 max-h-32 overflow-y-auto custom-scrollbar border-b border-slate-700/50 pb-2">
-            {stagedFiles.length === 0 ? (
+            {!hasContent && !data.knowledgeContext ? (
                 <div className="text-[10px] text-slate-600 text-center italic py-2">
                     No knowledge assets staged.
                 </div>
             ) : (
-                stagedFiles.map(file => (
-                    <div key={file.id} className="flex items-center justify-between p-2 bg-slate-900/50 border border-slate-700 rounded group hover:border-teal-500/30 transition-colors">
-                        <div className="flex items-center space-x-2 overflow-hidden">
-                            {/* Icon / Preview */}
-                            {file.type === 'pdf' ? (
-                                <FileText className="w-4 h-4 text-orange-400 shrink-0" />
-                            ) : (
-                                <div className="w-4 h-4 rounded bg-slate-800 overflow-hidden shrink-0 border border-slate-600">
-                                    {file.preview ? (
-                                        <img src={file.preview} alt="preview" className="w-full h-full object-cover" />
-                                    ) : (
-                                        <ImageIcon className="w-3 h-3 text-purple-400 m-0.5" />
-                                    )}
-                                </div>
-                            )}
+                <>
+                    {/* Persisted Rules Summary (Re-hydration view) */}
+                    {data.knowledgeContext && !hasLocalStaged && (
+                        <div className="p-2 bg-teal-900/20 border border-teal-800/50 rounded flex items-center space-x-2">
+                            <CheckCircle2 className="w-3 h-3 text-teal-500" />
+                            <span className="text-[10px] text-teal-200">
+                                {data.knowledgeContext.rules.length > 50 
+                                    ? "Knowledge Rules Loaded" 
+                                    : "Knowledge Context Ready"}
+                            </span>
+                        </div>
+                    )}
 
-                            {/* Info */}
-                            <div className="flex flex-col overflow-hidden min-w-[120px]">
-                                <span className="text-[10px] text-slate-300 truncate font-medium" title={file.file.name}>
-                                    {file.file.name}
-                                </span>
-                                <div className="flex items-center space-x-1">
-                                    <span className="text-[8px] text-slate-500 uppercase tracking-wider">
-                                        {file.type} • {(file.file.size / 1024).toFixed(0)}KB
+                    {/* Active Staging List */}
+                    {stagedFiles.map(file => (
+                        <div key={file.id} className="flex items-center justify-between p-2 bg-slate-900/50 border border-slate-700 rounded group hover:border-teal-500/30 transition-colors">
+                            <div className="flex items-center space-x-2 overflow-hidden">
+                                {file.type === 'pdf' ? (
+                                    <FileText className="w-4 h-4 text-orange-400 shrink-0" />
+                                ) : (
+                                    <div className="w-4 h-4 rounded bg-slate-800 overflow-hidden shrink-0 border border-slate-600">
+                                        {file.preview ? (
+                                            <img src={file.preview} alt="preview" className="w-full h-full object-cover" />
+                                        ) : (
+                                            <ImageIcon className="w-3 h-3 text-purple-400 m-0.5" />
+                                        )}
+                                    </div>
+                                )}
+                                <div className="flex flex-col overflow-hidden min-w-[120px]">
+                                    <span className="text-[10px] text-slate-300 truncate font-medium" title={file.file?.name}>
+                                        {file.file?.name || 'File'}
                                     </span>
-                                    {file.type === 'pdf' && file.extractedText && (
-                                        <span className="text-[8px] text-teal-500 font-mono" title="Characters Extracted">
-                                            [{file.extractedText.length} chars]
+                                    <div className="flex items-center space-x-1">
+                                        <span className="text-[8px] text-slate-500 uppercase tracking-wider">
+                                            {file.type}
                                         </span>
-                                    )}
-                                    {file.type === 'image' && file.status === 'complete' && (
-                                        <span className="text-[8px] text-teal-500 font-mono" title="Optimized">
-                                            [OPT]
-                                        </span>
-                                    )}
+                                        {file.type === 'pdf' && file.extractedText && (
+                                            <span className="text-[8px] text-teal-500 font-mono">
+                                                [{file.extractedText.length} chars]
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
+                            <div className="flex items-center space-x-2">
+                                {file.status === 'parsing' && <Loader2 className="w-3 h-3 text-teal-400 animate-spin" />}
+                                {file.status === 'complete' && <CheckCircle2 className="w-3 h-3 text-teal-500" />}
+                                <button 
+                                    onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
+                                    className="text-slate-600 hover:text-red-400 p-1 rounded transition-colors opacity-0 group-hover:opacity-100"
+                                >
+                                    <Trash2 className="w-3 h-3" />
+                                </button>
+                            </div>
                         </div>
-                        
-                        {/* Status / Actions */}
-                        <div className="flex items-center space-x-2">
-                            {/* Status Icons */}
-                            {file.status === 'parsing' && (
-                                <Loader2 className="w-3 h-3 text-teal-400 animate-spin" />
-                            )}
-                            {file.status === 'complete' && (
-                                <CheckCircle2 className="w-3 h-3 text-teal-500" />
-                            )}
-                            {file.status === 'error' && (
-                                <div title={file.errorMsg}>
-                                    <AlertCircle className="w-3 h-3 text-red-400" />
-                                </div>
-                            )}
-
-                            <button 
-                                onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
-                                className="text-slate-600 hover:text-red-400 p-1 rounded transition-colors opacity-0 group-hover:opacity-100"
-                            >
-                                <Trash2 className="w-3 h-3" />
-                            </button>
-                        </div>
-                    </div>
-                ))
+                    ))}
+                </>
             )}
         </div>
 
         {/* Visual Reference Anchors Gallery */}
-        {completedVisualAnchors.length > 0 && (
+        {displayAnchors.length > 0 && (
             <div className="flex flex-col space-y-2">
                 <div className="flex items-center justify-between">
                     <span className="text-[9px] uppercase text-teal-400 font-bold tracking-wider flex items-center gap-1">
                         <Layers className="w-3 h-3" /> Visual Reference Anchors
                     </span>
-                    <span className="text-[9px] text-slate-500 font-mono">{completedVisualAnchors.length} Ready</span>
+                    <span className="text-[9px] text-slate-500 font-mono">{displayAnchors.length} Ready</span>
                 </div>
                 
                 <div className="flex overflow-x-auto gap-2 pb-2 custom-scrollbar">
-                    {completedVisualAnchors.map(file => (
+                    {displayAnchors.map(file => (
                         <div key={file.id} className="relative group shrink-0 w-16 h-16 rounded border border-slate-700 bg-black/20 overflow-hidden shadow-sm hover:border-teal-500/50 transition-colors">
                             <img 
                                 src={file.preview} 
@@ -443,13 +464,15 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
                             <div className="absolute top-0 right-0 bg-teal-500 text-white text-[7px] font-bold px-1 rounded-bl leading-none shadow-sm">
                                 REF
                             </div>
-                            {/* Remove Overlay */}
-                            <button
-                                onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
-                                className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                            >
-                                <X className="w-5 h-5 text-white/80 hover:text-white drop-shadow-md" />
-                            </button>
+                            {/* Remove Overlay (Only for staged files, persisted ones are immutable in this view unless cleared) */}
+                            {!file.isPersisted && (
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
+                                    className="absolute inset-0 bg-black/60 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                    <X className="w-5 h-5 text-white/80 hover:text-white drop-shadow-md" />
+                                </button>
+                            )}
                         </div>
                     ))}
                 </div>
@@ -497,7 +520,6 @@ export const KnowledgeNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
 
       </div>
 
-      {/* Output Handle */}
       <Handle
         type="source"
         position={Position.Right}
