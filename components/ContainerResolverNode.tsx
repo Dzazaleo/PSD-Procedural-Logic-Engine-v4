@@ -96,7 +96,8 @@ export const ContainerResolverNode = memo(({ id, data }: NodeProps<PSDNodeData>)
           break;
       }
 
-      const childCount = result.layer?.children?.length || 0;
+      // Use deep count if available, otherwise fall back to direct children
+      const childCount = result.totalCount !== undefined ? result.totalCount : (result.layer?.children?.length || 0);
 
       return {
         index,

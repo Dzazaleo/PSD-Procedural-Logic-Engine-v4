@@ -14,6 +14,7 @@ export interface ResolverResult {
   layer: SerializableLayer | null;
   status: ResolverStatus;
   message: string;
+  totalCount?: number; // Recursive count of visible/leaf layers
 }
 
 // Helper: Deep recursive search for a layer by name
@@ -40,13 +41,30 @@ const findLayerDeep = (tree: SerializableLayer[], targetName: string, caseSensit
   return null;
 };
 
+// Helper: Recursively count leaf layers (pixels/generative)
+// Groups sum their children; Layers return 1.
+const getRecursiveLeafCount = (layer: SerializableLayer): number => {
+  // Base case: If it's not a group, it's a content layer (1)
+  if (layer.type !== 'group') {
+    return 1;
+  }
+  
+  // If it is a group but has no children, it's empty (0)
+  if (!layer.children || layer.children.length === 0) {
+    return 0;
+  }
+
+  // Recursive case: Sum of children's leaf counts
+  return layer.children.reduce((sum, child) => sum + getRecursiveLeafCount(child), 0);
+};
+
 /**
  * Hook to resolve a template container name to a matching design layer group.
  * 
  * Encapsulates the logic for:
  * 1. Stripping procedural prefixes (e.g., '!!SYMBOLS' -> 'SYMBOLS')
  * 2. Strict & Case-insensitive matching using DEEP RECURSION
- * 3. Hierarchy/Content validation
+ * 3. Hierarchy/Content validation using RECURSIVE LEAF COUNTING
  */
 export const usePsdResolver = () => {
   /**
@@ -54,7 +72,7 @@ export const usePsdResolver = () => {
    * 
    * @param templateName The name of the container/template (e.g. "!!SYMBOLS" or "SYMBOLS").
    * @param designTree The array of SerializableLayers from the PSD.
-   * @returns ResolverResult object containing the layer (if found), status code, and message.
+   * @returns ResolverResult object containing the layer (if found), status code, message, and deep count.
    */
   const resolveLayer = useCallback((templateName: string, designTree: SerializableLayer[] | null): ResolverResult => {
     // Check if design data is available (Rule 2: Data Locked)
@@ -62,7 +80,8 @@ export const usePsdResolver = () => {
       return { 
         status: 'DATA_LOCKED', 
         layer: null, 
-        message: 'Waiting for layer data...' 
+        message: 'Waiting for layer data...',
+        totalCount: 0
       };
     }
 
@@ -70,7 +89,8 @@ export const usePsdResolver = () => {
       return { 
         status: 'NO_NAME', 
         layer: null, 
-        message: 'No container connected' 
+        message: 'No container connected',
+        totalCount: 0
       };
     }
 
@@ -81,7 +101,8 @@ export const usePsdResolver = () => {
       return { 
         status: 'NO_NAME', 
         layer: null, 
-        message: 'Invalid name' 
+        message: 'Invalid name',
+        totalCount: 0
       };
     }
 
@@ -89,37 +110,44 @@ export const usePsdResolver = () => {
     const strictMatch = findLayerDeep(designTree, cleanTargetName, true);
     
     if (strictMatch) {
-       // Content Validation (Rule: Empty Group)
-       if (!strictMatch.children || strictMatch.children.length === 0) {
+       const totalCount = getRecursiveLeafCount(strictMatch);
+
+       // Content Validation (Rule: Recursive Empty Check)
+       if (totalCount === 0) {
            return { 
              status: 'EMPTY_GROUP', 
              layer: strictMatch, 
-             message: 'Group is empty' 
+             message: 'Group is empty',
+             totalCount: 0
            };
        }
        return { 
          status: 'RESOLVED', 
          layer: strictMatch, 
-         message: `${strictMatch.children.length} Layers Found` 
+         message: `${totalCount} Layers Found`,
+         totalCount: totalCount
        };
     }
 
     // 3. Loose Deep Search (Priority 2 - Fallback)
-    // Note: We use cleanTargetName for loose search as well, ignoring case inside the helper.
     const looseMatch = findLayerDeep(designTree, cleanTargetName, false);
     
     if (looseMatch) {
-       if (!looseMatch.children || looseMatch.children.length === 0) {
+       const totalCount = getRecursiveLeafCount(looseMatch);
+
+       if (totalCount === 0) {
            return { 
              status: 'EMPTY_GROUP', 
              layer: looseMatch, 
-             message: 'Empty (Case Mismatch)' 
+             message: 'Empty (Case Mismatch)',
+             totalCount: 0
            };
        }
        return { 
          status: 'CASE_MISMATCH', 
          layer: looseMatch, 
-         message: 'Warning: Case Mismatch' 
+         message: `Warning: Case Mismatch (${totalCount} Layers)`,
+         totalCount: totalCount
        };
     }
 
@@ -127,7 +155,8 @@ export const usePsdResolver = () => {
     return { 
       status: 'MISSING_DESIGN_GROUP', 
       layer: null, 
-      message: `No group named "${cleanTargetName}"` 
+      message: `No group named "${cleanTargetName}"`,
+      totalCount: 0
     };
   }, []);
 

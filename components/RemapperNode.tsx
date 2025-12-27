@@ -3,7 +3,7 @@ import { Handle, Position, NodeProps, useEdges, useReactFlow, useNodes } from 'r
 import { PSDNodeData, SerializableLayer, TransformedPayload, TransformedLayer, MAX_BOUNDARY_VIOLATION_PERCENT, LayoutStrategy } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
 import { GoogleGenAI } from "@google/genai";
-import { ChevronLeft, ChevronRight, Check, Sparkles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Check, Sparkles, Info, X } from 'lucide-react';
 
 interface InstanceData {
   index: number;
@@ -12,8 +12,8 @@ interface InstanceData {
     name?: string;
     nodeId?: string;
     handleId?: string;
-    originalBounds?: any;
-    layers?: any[];
+    originalBounds?: { x: number, y: number, w: number, h: number };
+    layers?: SerializableLayer[];
     aiStrategy?: LayoutStrategy;
     previewUrl?: string; 
     targetDimensions?: { w: number, h: number }; 
@@ -203,6 +203,364 @@ const GenerativePreviewOverlay = ({
         </div>
     );
 };
+
+// --- SUB-COMPONENT: Override Inspector ---
+interface OverrideMetric {
+    layerId: string;
+    name: string;
+    geomX: number;
+    geomY: number;
+    finalX: number;
+    finalY: number;
+    deltaX: number;
+    deltaY: number;
+    scale: number;
+}
+
+const calculateOverrideMetrics = (
+    sourceLayers: SerializableLayer[],
+    sourceRect: { x: number, y: number, w: number, h: number },
+    targetRect: { x: number, y: number, w: number, h: number },
+    strategy: LayoutStrategy
+): OverrideMetric[] => {
+    const metrics: OverrideMetric[] = [];
+    if (!strategy.overrides || strategy.overrides.length === 0) return metrics;
+
+    // 1. Calculate Geometric Baseline
+    const ratioX = targetRect.w / sourceRect.w;
+    const ratioY = targetRect.h / sourceRect.h;
+    let globalScale = Math.min(ratioX, ratioY);
+    let anchorX = targetRect.x;
+    let anchorY = targetRect.y;
+
+    if (strategy) {
+        globalScale = strategy.suggestedScale;
+        const scaledW = sourceRect.w * globalScale;
+        const scaledH = sourceRect.h * globalScale;
+        anchorX = targetRect.x + (targetRect.w - scaledW) / 2;
+        if (strategy.anchor === 'TOP') anchorY = targetRect.y;
+        else if (strategy.anchor === 'BOTTOM') anchorY = targetRect.y + (targetRect.h - scaledH);
+        else anchorY = targetRect.y + (targetRect.h - scaledH) / 2;
+    }
+
+    // 2. Recursive Traversal
+    const traverse = (layers: SerializableLayer[]) => {
+        layers.forEach(layer => {
+            const override = strategy.overrides?.find(o => o.layerId === layer.id);
+            
+            if (override) {
+                // Geometric Position
+                const relX = (layer.coords.x - sourceRect.x) / sourceRect.w;
+                const relY = (layer.coords.y - sourceRect.y) / sourceRect.h;
+                const geomX = anchorX + (relX * (sourceRect.w * globalScale));
+                const geomY = anchorY + (relY * (sourceRect.h * globalScale));
+
+                // Semantic Position
+                const finalX = targetRect.x + override.xOffset;
+                const finalY = targetRect.y + override.yOffset;
+
+                metrics.push({
+                    layerId: layer.id,
+                    name: layer.name,
+                    geomX,
+                    geomY,
+                    finalX,
+                    finalY,
+                    deltaX: finalX - geomX,
+                    deltaY: finalY - geomY,
+                    scale: override.individualScale
+                });
+            }
+
+            if (layer.children) traverse(layer.children);
+        });
+    };
+
+    traverse(sourceLayers);
+    return metrics;
+};
+
+const OverrideInspector = ({ 
+    sourceLayers, sourceBounds, targetBounds, strategy 
+}: { 
+    sourceLayers: SerializableLayer[], 
+    sourceBounds: { x: number, y: number, w: number, h: number }, 
+    targetBounds: { x: number, y: number, w: number, h: number }, 
+    strategy: LayoutStrategy 
+}) => {
+    const metrics = useMemo(
+        () => calculateOverrideMetrics(sourceLayers, sourceBounds, targetBounds, strategy),
+        [sourceLayers, sourceBounds, targetBounds, strategy]
+    );
+
+    if (metrics.length === 0) return null;
+
+    return (
+        <div className="bg-pink-900/10 border border-pink-500/30 rounded p-2 mt-2">
+            <div className="flex items-center justify-between mb-2 pb-1 border-b border-pink-500/20">
+                <span className="text-[9px] text-pink-300 font-bold uppercase tracking-wider flex items-center gap-1">
+                    <Sparkles className="w-3 h-3" /> Semantic Override Inspector
+                </span>
+                <span className="text-[9px] text-pink-400/70 font-mono">{metrics.length} Layers</span>
+            </div>
+            <div className="space-y-1 max-h-32 overflow-y-auto custom-scrollbar pr-1">
+                {metrics.map(m => (
+                    <div key={m.layerId} className="flex flex-col bg-slate-900/40 p-1.5 rounded border border-pink-500/10">
+                        <div className="flex justify-between items-center">
+                            <span className="text-[9px] text-slate-300 font-medium truncate max-w-[120px]" title={m.name}>
+                                {m.name}
+                            </span>
+                            <span className="text-[8px] text-pink-400 font-mono">
+                                Scale: {m.scale.toFixed(2)}x
+                            </span>
+                        </div>
+                        <div className="flex justify-between items-center mt-1">
+                            <span className="text-[8px] text-slate-500">Visual Delta</span>
+                            <div className="flex gap-2">
+                                <span className={`text-[8px] font-mono ${Math.abs(m.deltaX) > 1 ? 'text-white' : 'text-slate-600'}`}>
+                                    ΔX {m.deltaX > 0 ? '+' : ''}{Math.round(m.deltaX)}
+                                </span>
+                                <span className={`text-[8px] font-mono ${Math.abs(m.deltaY) > 1 ? 'text-white' : 'text-slate-600'}`}>
+                                    ΔY {m.deltaY > 0 ? '+' : ''}{Math.round(m.deltaY)}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+// --- SUB-COMPONENT: Instance Row (Extracted) ---
+const RemapperInstanceRow = memo(({ 
+    instance, 
+    confirmations, 
+    toggleInstanceGeneration, 
+    seekHistory, 
+    handleConfirmGeneration, 
+    handleImageLoad, 
+    isGeneratingPreview, 
+    displayPreviews, 
+    payloadRegistry, 
+    id, 
+    localSetting 
+}: {
+    instance: InstanceData, 
+    confirmations: Record<number, string>, 
+    toggleInstanceGeneration: (idx: number) => void, 
+    seekHistory: (nodeId: string, handle: string, dir: number) => void, 
+    handleConfirmGeneration: (idx: number, prompt: string, url?: string) => void, 
+    handleImageLoad: (idx: number) => void, 
+    isGeneratingPreview: Record<number, boolean>, 
+    displayPreviews: Record<number, string>, 
+    payloadRegistry: any, 
+    id: string, 
+    localSetting: boolean 
+}) => {
+    const [isInspectorOpen, setInspectorOpen] = useState(false);
+
+    const hasPreview = !!instance.payload?.previewUrl;
+    const isAwaiting = instance.payload?.status === 'awaiting_confirmation';
+    const currentPrompt = instance.source.aiStrategy?.generativePrompt;
+    const confirmedPrompt = confirmations[instance.index];
+    const isConfirmed = !!currentPrompt && currentPrompt === confirmedPrompt;
+    const refinementPending = !!confirmedPrompt && !!currentPrompt && confirmedPrompt !== currentPrompt;
+    
+    // LOGIC GATE CHECK for UI
+    const effectiveAllowed = instance.payload?.generationAllowed ?? true;
+    
+    // Only show overlay if AI is allowed
+    const showOverlay = effectiveAllowed && (hasPreview || isAwaiting || refinementPending);
+
+    // Fetch History directly from Store Payload (Source of Truth for Navigation)
+    const storePayload = payloadRegistry[id]?.[`result-out-${instance.index}`];
+    const history = storePayload?.history || [];
+    const activeIndex = storePayload?.activeHistoryIndex;
+    const latestDraft = storePayload?.latestDraftUrl;
+    const persistedPreview = storePayload?.previewUrl;
+    const storeIsSynthesizing = storePayload?.isSynthesizing;
+    const storeConfirmed = storePayload?.isConfirmed;
+
+    const effectivePreview = persistedPreview || displayPreviews[instance.index] || instance.payload?.previewUrl;
+    const iterativeSource = storePayload?.sourceReference || instance.payload?.sourceReference;
+    
+    const isEffectiveGenerating = !!isGeneratingPreview[instance.index] || !!storeIsSynthesizing;
+
+    const hasOverrides = instance.source.aiStrategy?.overrides && instance.source.aiStrategy.overrides.length > 0;
+
+    return (
+        <div className="relative p-3 border-b border-slate-700/50 bg-slate-800 space-y-3 hover:bg-slate-700/20 transition-colors first:rounded-t-none">
+           
+           <div className="flex flex-col space-y-3">
+              <div className="relative flex items-center justify-between group">
+                 <div className="flex flex-col w-full">
+                     <div className="flex items-center justify-between mb-0.5">
+                        <div className="flex items-center space-x-1.5">
+                            <label className="text-[9px] uppercase text-slate-500 font-bold tracking-wider ml-1">Source Input</label>
+                            <button 
+                               onClick={(e) => { e.stopPropagation(); toggleInstanceGeneration(instance.index); }}
+                               className={`nodrag nopan p-0.5 rounded transition-colors ${localSetting ? 'text-purple-400 hover:text-purple-300 bg-purple-500/10' : 'text-slate-600 hover:text-slate-500'}`}
+                               title="Toggle Generative AI for this instance"
+                            >
+                                <Sparkles className="w-3 h-3" fill={localSetting ? "currentColor" : "none"} />
+                            </button>
+                        </div>
+                        {instance.source.ready && <span className="text-[8px] text-blue-400 font-mono">LINKED</span>}
+                     </div>
+                     
+                     <div className={`relative text-xs px-3 py-1.5 rounded border transition-colors ${
+                        instance.source.ready 
+                          ? 'bg-indigo-900/30 border-indigo-500/30 text-indigo-200 shadow-sm' 
+                          : 'bg-slate-900 border-slate-700 text-slate-500 italic'
+                      }`}>
+                        <Handle 
+                           type="target" 
+                           position={Position.Left} 
+                           id={`source-in-${instance.index}`} 
+                           className={`!w-3 !h-3 !-left-4 !border-2 z-50 transition-colors duration-200 ${
+                               instance.source.ready 
+                               ? '!bg-indigo-500 !border-white' 
+                               : '!bg-slate-700 !border-slate-500 group-hover:!bg-slate-600'
+                           }`} 
+                           style={{ top: '50%', transform: 'translateY(-50%)' }}
+                           title={`Source for Instance ${instance.index}`}
+                         />
+                        {instance.source.ready ? instance.source.name : 'Connect Source...'}
+                     </div>
+                 </div>
+              </div>
+
+              <div className="relative flex items-center justify-between group">
+                 <div className="flex flex-col w-full">
+                     <div className="flex items-center justify-between mb-0.5">
+                        <label className="text-[9px] uppercase text-slate-500 font-bold tracking-wider ml-1">Target Slot</label>
+                        {instance.target.ready && <span className="text-[8px] text-emerald-400 font-mono">LINKED</span>}
+                     </div>
+
+                     <div className={`relative text-xs px-3 py-1.5 rounded border transition-colors ${
+                        instance.target.ready 
+                          ? 'bg-emerald-900/20 border-emerald-500/30 text-emerald-300 shadow-sm' 
+                          : 'bg-slate-900 border-slate-700 text-slate-500 italic'
+                      }`}>
+                        <Handle 
+                           type="target" 
+                           position={Position.Left} 
+                           id={`target-in-${instance.index}`} 
+                           className={`!w-3 !h-3 !-left-4 !border-2 z-50 transition-colors duration-200 ${
+                               instance.target.ready 
+                               ? '!bg-emerald-500 !border-white' 
+                               : '!bg-slate-700 !border-slate-500 group-hover:!bg-slate-600'
+                           }`} 
+                           style={{ top: '50%', transform: 'translateY(-50%)' }}
+                           title={`Target for Instance ${instance.index}`}
+                         />
+                        {instance.target.ready ? instance.target.name : 'Connect Target...'}
+                     </div>
+                 </div>
+              </div>
+           </div>
+
+           <div className="relative mt-2 pt-3 border-t border-slate-700/50 flex flex-col space-y-2">
+              {instance.payload ? (
+                  <div className="flex flex-col w-full pr-4">
+                      <div className="flex justify-between items-center">
+                          <div className="flex items-center space-x-2">
+                              <span className="text-[10px] text-emerald-400 font-bold tracking-wide">READY</span>
+                              {instance.strategyUsed && (
+                                  <div className="flex items-center gap-1">
+                                      <span className="text-[8px] bg-pink-500/20 text-pink-300 px-1 rounded border border-pink-500/40">AI ENHANCED</span>
+                                      {hasOverrides && (
+                                          <button 
+                                            onClick={(e) => { e.stopPropagation(); setInspectorOpen(!isInspectorOpen); }}
+                                            className={`p-0.5 rounded transition-colors ${isInspectorOpen ? 'text-pink-200 bg-pink-500/30' : 'text-slate-500 hover:text-pink-300'}`}
+                                            title="Toggle Override Inspector"
+                                          >
+                                              <Info className="w-3 h-3" />
+                                          </button>
+                                      )}
+                                  </div>
+                              )}
+                              {instance.payload.requiresGeneration && effectiveAllowed && (
+                                  <span className="text-[8px] bg-purple-500/20 text-purple-300 px-1 rounded border border-purple-500/40">GEN</span>
+                              )}
+                              {!effectiveAllowed && (
+                                  <span className="text-[8px] bg-slate-700 text-slate-400 px-1 rounded border border-slate-600">AI MUTED</span>
+                              )}
+                          </div>
+                          <span className="text-[10px] text-slate-400 font-mono">{instance.payload.scaleFactor.toFixed(2)}x Scale</span>
+                      </div>
+                      
+                      <div className={`w-full h-1 rounded overflow-hidden mt-1 ${instance.strategyUsed ? 'bg-pink-900' : 'bg-slate-900'}`}>
+                         <div className={`h-full ${instance.strategyUsed ? 'bg-pink-500' : 'bg-emerald-500'}`} style={{ width: '100%' }}></div>
+                      </div>
+                      
+                      {/* Override Inspector */}
+                      {isInspectorOpen && instance.source.layers && instance.source.originalBounds && instance.target.bounds && instance.source.aiStrategy && (
+                          <OverrideInspector 
+                              sourceLayers={instance.source.layers}
+                              sourceBounds={instance.source.originalBounds}
+                              targetBounds={instance.target.bounds}
+                              strategy={instance.source.aiStrategy}
+                          />
+                      )}
+                      
+                      {showOverlay && (
+                          <div className="mt-2 p-2 bg-slate-900/50 border border-slate-700 rounded flex flex-col space-y-2">
+                              {isAwaiting && (
+                                   <span className="text-[9px] text-yellow-200 font-medium leading-tight">
+                                       ⚠️ High procedural distortion.
+                                   </span>
+                              )}
+                              {refinementPending && (
+                                  <div className="flex items-center space-x-1.5 p-1.5 bg-indigo-900/40 border border-indigo-500/30 rounded mb-1 animate-pulse">
+                                      <svg className="w-3 h-3 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                                      <span className="text-[9px] text-indigo-200 font-medium leading-none">Refinement detected. Re-confirm to apply.</span>
+                                  </div>
+                              )}
+                              
+                              <GenerativePreviewOverlay 
+                                  previewUrl={effectivePreview}
+                                  canonicalUrl={persistedPreview}
+                                  history={history}
+                                  activeHistoryIndex={activeIndex}
+                                  hasDraft={!!latestDraft}
+                                  isGenerating={isEffectiveGenerating}
+                                  scale={instance.payload.scaleFactor}
+                                  onConfirm={(url) => handleConfirmGeneration(instance.index, instance.source.aiStrategy?.generativePrompt || '', url)}
+                                  onSeek={(direction) => seekHistory(id, `result-out-${instance.index}`, direction)}
+                                  isStoreConfirmed={!!storeConfirmed}
+                                  targetDimensions={instance.source.targetDimensions || instance.target.bounds}
+                                  sourceReference={iterativeSource}
+                                  onImageLoad={() => handleImageLoad(instance.index)}
+                                  generationId={storePayload?.generationId}
+                              />
+                          </div>
+                      )}
+                  </div>
+              ) : (
+                  <div className="flex items-center space-x-2 opacity-50">
+                      <svg className="w-3 h-3 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                      <span className="text-[10px] text-slate-500 italic">Waiting for connection...</span>
+                  </div>
+              )}
+              
+              <Handle 
+                 type="source" 
+                 position={Position.Right} 
+                 id={`result-out-${instance.index}`} 
+                 className={`!w-3 !h-3 !-right-1.5 !border-2 transition-colors duration-300 z-50 ${
+                     instance.payload && instance.payload.status !== 'error' 
+                     ? '!bg-emerald-500 !border-white' 
+                     : '!bg-slate-700 !border-slate-500'
+                 }`} 
+                 style={{ top: '50%', transform: 'translateY(-50%)' }}
+                 title={`Output Payload ${instance.index}`} 
+              />
+           </div>
+        </div>
+    );
+});
 
 export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const instanceCount = data.instanceCount || 1;
@@ -743,190 +1101,22 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       </div>
 
       <div className="flex flex-col">
-          {instances.map((instance) => {
-             const hasPreview = !!instance.payload?.previewUrl;
-             const isAwaiting = instance.payload?.status === 'awaiting_confirmation';
-             const currentPrompt = instance.source.aiStrategy?.generativePrompt;
-             const confirmedPrompt = confirmations[instance.index];
-             const isConfirmed = !!currentPrompt && currentPrompt === confirmedPrompt;
-             const refinementPending = !!confirmedPrompt && !!currentPrompt && confirmedPrompt !== currentPrompt;
-             
-             // LOGIC GATE CHECK for UI
-             // We use the payload's gate state which reflects (Global && Local)
-             // However, for the toggle UI itself, we want to reflect the permission state.
-             const effectiveAllowed = instance.payload?.generationAllowed ?? true;
-             
-             // Only show overlay if AI is allowed
-             const showOverlay = effectiveAllowed && (hasPreview || isAwaiting || refinementPending);
-
-             // Fetch History directly from Store Payload (Source of Truth for Navigation)
-             const storePayload = payloadRegistry[id]?.[`result-out-${instance.index}`];
-             const history = storePayload?.history || [];
-             const activeIndex = storePayload?.activeHistoryIndex;
-             const latestDraft = storePayload?.latestDraftUrl;
-             const persistedPreview = storePayload?.previewUrl;
-             const storeIsSynthesizing = storePayload?.isSynthesizing;
-             const storeConfirmed = storePayload?.isConfirmed;
-
-             const effectivePreview = persistedPreview || displayPreviews[instance.index] || instance.payload?.previewUrl;
-             const iterativeSource = storePayload?.sourceReference || instance.payload?.sourceReference;
-             
-             const isEffectiveGenerating = !!isGeneratingPreview[instance.index] || !!storeIsSynthesizing;
-
-             // Local settings state from Node Data (for UI sync)
-             const localSetting = instanceSettings[instance.index]?.generationAllowed ?? true;
-
-             return (
-             <div key={instance.index} className="relative p-3 border-b border-slate-700/50 bg-slate-800 space-y-3 hover:bg-slate-700/20 transition-colors first:rounded-t-none">
-                
-                <div className="flex flex-col space-y-3">
-                   <div className="relative flex items-center justify-between group">
-                      <div className="flex flex-col w-full">
-                          <div className="flex items-center justify-between mb-0.5">
-                             <div className="flex items-center space-x-1.5">
-                                 <label className="text-[9px] uppercase text-slate-500 font-bold tracking-wider ml-1">Source Input</label>
-                                 <button 
-                                    onClick={(e) => { e.stopPropagation(); toggleInstanceGeneration(instance.index); }}
-                                    className={`nodrag nopan p-0.5 rounded transition-colors ${localSetting ? 'text-purple-400 hover:text-purple-300 bg-purple-500/10' : 'text-slate-600 hover:text-slate-500'}`}
-                                    title="Toggle Generative AI for this instance"
-                                 >
-                                     <Sparkles className="w-3 h-3" fill={localSetting ? "currentColor" : "none"} />
-                                 </button>
-                             </div>
-                             {instance.source.ready && <span className="text-[8px] text-blue-400 font-mono">LINKED</span>}
-                          </div>
-                          
-                          <div className={`relative text-xs px-3 py-1.5 rounded border transition-colors ${
-                             instance.source.ready 
-                               ? 'bg-indigo-900/30 border-indigo-500/30 text-indigo-200 shadow-sm' 
-                               : 'bg-slate-900 border-slate-700 text-slate-500 italic'
-                           }`}>
-                             <Handle 
-                                type="target" 
-                                position={Position.Left} 
-                                id={`source-in-${instance.index}`} 
-                                className={`!w-3 !h-3 !-left-4 !border-2 z-50 transition-colors duration-200 ${
-                                    instance.source.ready 
-                                    ? '!bg-indigo-500 !border-white' 
-                                    : '!bg-slate-700 !border-slate-500 group-hover:!bg-slate-600'
-                                }`} 
-                                style={{ top: '50%', transform: 'translateY(-50%)' }}
-                                title={`Source for Instance ${instance.index}`}
-                              />
-                             {instance.source.ready ? instance.source.name : 'Connect Source...'}
-                          </div>
-                      </div>
-                   </div>
-
-                   <div className="relative flex items-center justify-between group">
-                      <div className="flex flex-col w-full">
-                          <div className="flex items-center justify-between mb-0.5">
-                             <label className="text-[9px] uppercase text-slate-500 font-bold tracking-wider ml-1">Target Slot</label>
-                             {instance.target.ready && <span className="text-[8px] text-emerald-400 font-mono">LINKED</span>}
-                          </div>
-
-                          <div className={`relative text-xs px-3 py-1.5 rounded border transition-colors ${
-                             instance.target.ready 
-                               ? 'bg-emerald-900/20 border-emerald-500/30 text-emerald-300 shadow-sm' 
-                               : 'bg-slate-900 border-slate-700 text-slate-500 italic'
-                           }`}>
-                             <Handle 
-                                type="target" 
-                                position={Position.Left} 
-                                id={`target-in-${instance.index}`} 
-                                className={`!w-3 !h-3 !-left-4 !border-2 z-50 transition-colors duration-200 ${
-                                    instance.target.ready 
-                                    ? '!bg-emerald-500 !border-white' 
-                                    : '!bg-slate-700 !border-slate-500 group-hover:!bg-slate-600'
-                                }`} 
-                                style={{ top: '50%', transform: 'translateY(-50%)' }}
-                                title={`Target for Instance ${instance.index}`}
-                              />
-                             {instance.target.ready ? instance.target.name : 'Connect Target...'}
-                          </div>
-                      </div>
-                   </div>
-                </div>
-
-                <div className="relative mt-2 pt-3 border-t border-slate-700/50 flex flex-col space-y-2">
-                   {instance.payload ? (
-                       <div className="flex flex-col w-full pr-4">
-                           <div className="flex justify-between items-center">
-                               <div className="flex items-center space-x-2">
-                                   <span className="text-[10px] text-emerald-400 font-bold tracking-wide">READY</span>
-                                   {instance.strategyUsed && (
-                                       <span className="text-[8px] bg-pink-500/20 text-pink-300 px-1 rounded border border-pink-500/40">AI ENHANCED</span>
-                                   )}
-                                   {instance.payload.requiresGeneration && effectiveAllowed && (
-                                       <span className="text-[8px] bg-purple-500/20 text-purple-300 px-1 rounded border border-purple-500/40">GEN</span>
-                                   )}
-                                   {!effectiveAllowed && (
-                                       <span className="text-[8px] bg-slate-700 text-slate-400 px-1 rounded border border-slate-600">AI MUTED</span>
-                                   )}
-                               </div>
-                               <span className="text-[10px] text-slate-400 font-mono">{instance.payload.scaleFactor.toFixed(2)}x Scale</span>
-                           </div>
-                           
-                           <div className={`w-full h-1 rounded overflow-hidden mt-1 ${instance.strategyUsed ? 'bg-pink-900' : 'bg-slate-900'}`}>
-                              <div className={`h-full ${instance.strategyUsed ? 'bg-pink-500' : 'bg-emerald-500'}`} style={{ width: '100%' }}></div>
-                           </div>
-                           
-                           {showOverlay && (
-                               <div className="mt-2 p-2 bg-slate-900/50 border border-slate-700 rounded flex flex-col space-y-2">
-                                   {isAwaiting && (
-                                        <span className="text-[9px] text-yellow-200 font-medium leading-tight">
-                                            ⚠️ High procedural distortion.
-                                        </span>
-                                   )}
-                                   {refinementPending && (
-                                       <div className="flex items-center space-x-1.5 p-1.5 bg-indigo-900/40 border border-indigo-500/30 rounded mb-1 animate-pulse">
-                                           <svg className="w-3 h-3 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                                           <span className="text-[9px] text-indigo-200 font-medium leading-none">Refinement detected. Re-confirm to apply.</span>
-                                       </div>
-                                   )}
-                                   
-                                   <GenerativePreviewOverlay 
-                                       previewUrl={effectivePreview}
-                                       canonicalUrl={persistedPreview}
-                                       history={history}
-                                       activeHistoryIndex={activeIndex}
-                                       hasDraft={!!latestDraft}
-                                       isGenerating={isEffectiveGenerating}
-                                       scale={instance.payload.scaleFactor}
-                                       onConfirm={(url) => handleConfirmGeneration(instance.index, instance.source.aiStrategy?.generativePrompt || '', url)}
-                                       onSeek={(direction) => seekHistory(id, `result-out-${instance.index}`, direction)}
-                                       isStoreConfirmed={!!storeConfirmed}
-                                       targetDimensions={instance.source.targetDimensions || instance.target.bounds}
-                                       sourceReference={iterativeSource}
-                                       onImageLoad={() => handleImageLoad(instance.index)}
-                                       generationId={storePayload?.generationId}
-                                   />
-                               </div>
-                           )}
-                       </div>
-                   ) : (
-                       <div className="flex items-center space-x-2 opacity-50">
-                           <svg className="w-3 h-3 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                           <span className="text-[10px] text-slate-500 italic">Waiting for connection...</span>
-                       </div>
-                   )}
-                   
-                   <Handle 
-                      type="source" 
-                      position={Position.Right} 
-                      id={`result-out-${instance.index}`} 
-                      className={`!w-3 !h-3 !-right-1.5 !border-2 transition-colors duration-300 z-50 ${
-                          instance.payload && instance.payload.status !== 'error' 
-                          ? '!bg-emerald-500 !border-white' 
-                          : '!bg-slate-700 !border-slate-500'
-                      }`} 
-                      style={{ top: '50%', transform: 'translateY(-50%)' }}
-                      title={`Output Payload ${instance.index}`} 
-                   />
-                </div>
-             </div>
-             );
-          })}
+          {instances.map((instance) => (
+             <RemapperInstanceRow 
+                key={instance.index}
+                instance={instance}
+                confirmations={confirmations}
+                toggleInstanceGeneration={toggleInstanceGeneration}
+                seekHistory={seekHistory}
+                handleConfirmGeneration={handleConfirmGeneration}
+                handleImageLoad={handleImageLoad}
+                isGeneratingPreview={isGeneratingPreview}
+                displayPreviews={displayPreviews}
+                payloadRegistry={payloadRegistry}
+                id={id}
+                localSetting={instanceSettings[instance.index]?.generationAllowed ?? true}
+             />
+          ))}
       </div>
 
       <button 
