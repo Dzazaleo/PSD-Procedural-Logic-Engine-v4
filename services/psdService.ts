@@ -1,5 +1,5 @@
 import { readPsd, writePsd, Psd, ReadOptions, WriteOptions, Layer } from 'ag-psd';
-import { TemplateMetadata, ContainerDefinition, DesignValidationReport, ValidationIssue, SerializableLayer, ContainerContext } from '../types';
+import { TemplateMetadata, ContainerDefinition, DesignValidationReport, ValidationIssue, SerializableLayer, ContainerContext, TransformedLayer } from '../types';
 
 // --- Procedural Palette & Theme Logic ---
 
@@ -410,5 +410,84 @@ export const writePsdFile = async (psd: Psd, filename: string) => {
   } catch (err) {
     console.error("Error writing PSD file:", err);
     throw new Error("Failed to construct PSD binary.");
+  }
+};
+
+// --- Phase 1: Pixel Extraction Utilities ---
+
+/**
+ * Utility 1: Retrieves the HTMLCanvasElement from an ag-psd Layer.
+ * Handles missing canvas or group layers gracefully by returning a transparent placeholder.
+ */
+export const getLayerCanvas = (layer: Layer): HTMLCanvasElement => {
+  if (layer.canvas instanceof HTMLCanvasElement) {
+    return layer.canvas;
+  }
+  
+  // Return transparent 1x1 canvas for groups or adjustment layers without pixels
+  const placeholder = document.createElement('canvas');
+  placeholder.width = 1;
+  placeholder.height = 1;
+  return placeholder;
+};
+
+/**
+ * Utility 2: Renders a source ag-psd Layer onto a target context using transformation metadata.
+ * Applies the calculated scale and offset to place pixels accurately.
+ */
+export const renderLayerToTarget = (
+  sourceLayer: Layer, 
+  ctx: CanvasRenderingContext2D, 
+  metadata: TransformedLayer
+) => {
+  // If the source layer has no canvas (e.g. group), skip drawing content
+  if (!sourceLayer.canvas) return;
+
+  const canvas = getLayerCanvas(sourceLayer);
+  const { offsetX, offsetY } = metadata.transform;
+  
+  // The 'coords' width/height in TransformedLayer represents the *final* visual size
+  // which already includes the scaleX/scaleY factors applied to the original bounds.
+  const destW = metadata.coords.w;
+  const destH = metadata.coords.h;
+
+  ctx.drawImage(canvas, offsetX, offsetY, destW, destH);
+};
+
+/**
+ * Utility 3: Recursively composites the TransformedLayer hierarchy using raw binary pixel data.
+ * Traverses the visual tree bottom-up (Painter's Algorithm) to ensure correct z-index stacking.
+ */
+export const compositeHierarchy = (
+  transformedLayers: TransformedLayer[], 
+  sourcePsd: Psd, 
+  ctx: CanvasRenderingContext2D
+) => {
+  // Iterate in REVERSE to draw bottom layers first (Painter's Algorithm).
+  // The transformedLayers array usually follows Photoshop Top-Down order (0 is top).
+  for (let i = transformedLayers.length - 1; i >= 0; i--) {
+    const node = transformedLayers[i];
+    
+    // Visibility check
+    if (!node.isVisible) continue;
+
+    if (node.type === 'group' && node.children) {
+      // Recursion for groups
+      compositeHierarchy(node.children, sourcePsd, ctx);
+    } else {
+      // It's a pixel layer. Attempt to fetch binary data.
+      // Note: 'generative' layers have synthetic IDs and will return null here (skipped).
+      const sourceLayer = findLayerByPath(sourcePsd, node.id);
+      
+      if (sourceLayer) {
+        // Apply Opacity (ag-psd 0-255 handled in extraction? No, use metadata opacity)
+        const prevAlpha = ctx.globalAlpha;
+        ctx.globalAlpha = node.opacity; // node.opacity is 0-1
+        
+        renderLayerToTarget(sourceLayer, ctx, node);
+        
+        ctx.globalAlpha = prevAlpha;
+      }
+    }
   }
 };
