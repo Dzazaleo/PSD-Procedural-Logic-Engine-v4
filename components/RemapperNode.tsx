@@ -332,6 +332,32 @@ const OverrideInspector = ({
     );
 };
 
+// --- HELPER: Process Breakdown Calculation ---
+const calculateProcessCounts = (layers: TransformedLayer[], overrideIds: Set<string>) => {
+  let geometric = 0;
+  let generative = 0;
+  let overrides = 0;
+
+  const traverse = (nodes: TransformedLayer[]) => {
+    for (const node of nodes) {
+      if (node.type === 'generative') {
+        generative++;
+      } else {
+        geometric++;
+        if (overrideIds.has(node.id)) {
+          overrides++;
+        }
+      }
+      if (node.children) {
+        traverse(node.children);
+      }
+    }
+  };
+
+  traverse(layers);
+  return { geometric, generative, overrides };
+};
+
 // --- SUB-COMPONENT: Instance Row (Extracted) ---
 const RemapperInstanceRow = memo(({ 
     instance, 
@@ -388,6 +414,13 @@ const RemapperInstanceRow = memo(({
     const isEffectiveGenerating = !!isGeneratingPreview[instance.index] || !!storeIsSynthesizing;
 
     const hasOverrides = instance.source.aiStrategy?.overrides && instance.source.aiStrategy.overrides.length > 0;
+
+    // Process Breakdown Stats
+    const processStats = useMemo(() => {
+        if (!instance.payload?.layers) return null;
+        const overrideIds = new Set(instance.source.aiStrategy?.overrides?.map(o => o.layerId) || []);
+        return calculateProcessCounts(instance.payload.layers, overrideIds);
+    }, [instance.payload?.layers, instance.source.aiStrategy]);
 
     return (
         <div className="relative p-3 border-b border-slate-700/50 bg-slate-800 space-y-3 hover:bg-slate-700/20 transition-colors first:rounded-t-none">
@@ -494,6 +527,39 @@ const RemapperInstanceRow = memo(({
                       <div className={`w-full h-1 rounded overflow-hidden mt-1 ${instance.strategyUsed ? 'bg-pink-900' : 'bg-slate-900'}`}>
                          <div className={`h-full ${instance.strategyUsed ? 'bg-pink-500' : 'bg-emerald-500'}`} style={{ width: '100%' }}></div>
                       </div>
+
+                      {/* Process Summary Breakdown */}
+                      {processStats && (
+                          <div className="flex flex-wrap gap-2 mt-2">
+                              {/* Geometric Count */}
+                              <div className="px-2 py-0.5 rounded border border-emerald-500/30 bg-emerald-900/20 flex items-center space-x-1.5">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-emerald-400"></div>
+                                  <span className="text-[9px] text-emerald-300 font-mono font-medium">
+                                      {processStats.geometric} Layers Remapped
+                                  </span>
+                              </div>
+                              
+                              {/* Generative Count */}
+                              {processStats.generative > 0 && (
+                                  <div className="px-2 py-0.5 rounded border border-purple-500/30 bg-purple-900/20 flex items-center space-x-1.5">
+                                      <div className="w-1.5 h-1.5 rounded-full bg-purple-400"></div>
+                                      <span className="text-[9px] text-purple-300 font-mono font-medium">
+                                          {processStats.generative} Layers Synthesized
+                                      </span>
+                                  </div>
+                              )}
+
+                              {/* Semantic Overrides Count */}
+                              {processStats.overrides > 0 && (
+                                  <div className="px-2 py-0.5 rounded border border-pink-500/30 bg-pink-900/20 flex items-center space-x-1.5">
+                                      <div className="w-1.5 h-1.5 rounded-full bg-pink-400"></div>
+                                      <span className="text-[9px] text-pink-300 font-mono font-medium">
+                                          {processStats.overrides} Semantic Adjustments
+                                      </span>
+                                  </div>
+                              )}
+                          </div>
+                      )}
                       
                       {/* Override Inspector */}
                       {isInspectorOpen && instance.source.layers && instance.source.originalBounds && instance.target.bounds && instance.source.aiStrategy && (
