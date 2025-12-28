@@ -224,19 +224,22 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
     return { slotConnections: map, validationErrors: errors };
   }, [edges, id, payloadRegistry, resolvedRegistry]);
 
-  // 3. Status Calculation
+  // 3. Status Calculation (Updated for Elastic Partial Synthesis)
   const totalSlots = containers.length;
   const filledSlots = slotConnections.size;
   const isTemplateReady = !!templateMetadata;
-  const isFullyAssembled = isTemplateReady && filledSlots === totalSlots && totalSlots > 0 && validationErrors.length === 0;
+  
+  // LOGIC UPDATE: Allow export if at least one slot is filled (Partial Assembly)
+  const isExportReady = isTemplateReady && filledSlots > 0 && validationErrors.length === 0;
+  const isPartial = filledSlots < totalSlots;
   
   // 4. Export Logic
   const handleExport = async () => {
-    if (!templateMetadata || !isFullyAssembled) return;
+    if (!templateMetadata || !isExportReady) return;
     
     setIsExporting(true);
     setExportError(null);
-    setExportStatus('Analyzing procedural graph...');
+    setExportStatus(isPartial ? 'Partial Synthesis...' : 'Full Assembly...');
 
     try {
       // A. Initialize New PSD Structure
@@ -255,6 +258,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
       for (const container of containers) {
           const payload = slotConnections.get(container.name);
           
+          // Only process slots that are actually connected (Sparse Mapping)
           if (payload) {
               // Recursive search for generative layers in the Transformed Tree
               const findGenerativeLayers = (layers: TransformedLayer[]) => {
@@ -328,6 +332,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
             // BRANCH 1: Generative Layer (Synthetic)
             if (metaLayer.type === 'generative') {
                 const asset = assets.get(metaLayer.id);
+                // Safety Guard: Only include generative layers if we successfully have a buffer
                 if (asset) {
                     newLayer = {
                         name: metaLayer.name,
@@ -378,6 +383,8 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
       for (const container of containers) {
           const payload = slotConnections.get(container.name);
           
+          // PARTIAL SYNTHESIS: Only process slots that have a payload.
+          // Unconnected slots are implicitly omitted (Sparse Export).
           if (payload) {
               // Retrieve Source Binary for cloning standard layers
               const sourcePsd = psdRegistry[payload.sourceNodeId];
@@ -388,6 +395,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
                   generatedAssets
               );
               
+              // SEMANTIC INTEGRITY: Wrap partial content in original semantic group
               const containerGroup: Layer = {
                   name: container.originalName,
                   children: reconstructedContent,
@@ -406,7 +414,10 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
 
       // D. Write to File
       setExportStatus('Finalizing binary...');
-      await writePsdFile(newPsd, `PROCEDURAL_EXPORT_${Date.now()}.psd`);
+      const fileName = isPartial 
+        ? `PARTIAL_EXPORT_${filledSlots}_SLOTS_${Date.now()}.psd` 
+        : `FULL_EXPORT_${Date.now()}.psd`;
+      await writePsdFile(newPsd, fileName);
       setExportStatus('Done');
 
     } catch (e: any) {
@@ -522,8 +533,8 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
       <div className="p-3 bg-slate-800 border-t border-slate-700">
           <div className="flex justify-between text-[10px] text-slate-400 mb-2 font-mono border-b border-slate-700 pb-2">
               <span>ASSEMBLY STATUS</span>
-              <span className={isFullyAssembled ? 'text-emerald-400 font-bold' : 'text-orange-400'}>
-                  {filledSlots} / {totalSlots} SLOTS
+              <span className={isExportReady ? (isPartial ? 'text-yellow-400 font-bold' : 'text-emerald-400 font-bold') : 'text-slate-500'}>
+                  {filledSlots} / {totalSlots} SLOTS {isPartial && filledSlots > 0 ? '(PARTIAL)' : ''}
               </span>
           </div>
 
@@ -547,10 +558,12 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
 
           <button
             onClick={handleExport}
-            disabled={!isFullyAssembled || isExporting}
+            disabled={!isExportReady || isExporting}
             className={`w-full py-2 px-4 rounded text-xs font-bold uppercase tracking-wider transition-all shadow-lg
-                ${isFullyAssembled && !isExporting
-                    ? 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white cursor-pointer transform hover:-translate-y-0.5' 
+                ${isExportReady && !isExporting
+                    ? isPartial 
+                        ? 'bg-gradient-to-r from-yellow-600 to-orange-600 hover:from-yellow-500 hover:to-orange-500 text-white cursor-pointer transform hover:-translate-y-0.5'
+                        : 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white cursor-pointer transform hover:-translate-y-0.5' 
                     : 'bg-slate-700 text-slate-500 cursor-not-allowed border border-slate-600'}
             `}
           >
@@ -560,7 +573,7 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
                      <span className="truncate">{exportStatus}</span>
                  </span>
              ) : (
-                 "Export File"
+                 isPartial ? `Export Partial PSD (${filledSlots}/${totalSlots})` : "Export Complete PSD"
              )}
           </button>
       </div>

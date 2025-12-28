@@ -156,18 +156,17 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
 
   const registerResolved = useCallback((nodeId: string, handleId: string, context: MappingContext) => {
     // SANITATION LOGIC (Ghost Flushing)
+    // PRESERVE GEOMETRIC PREVIEWS: Removed the previewUrl reset logic that previously forced
+    // clear-outs when generation was disabled. Now, we rely on downstream compositors to update the previewUrl.
+    
     let sanitizedContext = context;
 
-    // Check Logic Gate: Is generation permitted?
-    // We check specifically if allowed is FALSE. Undefined implies allowed (default).
-    // Or we can be strict. Let's assume explicit disablement is required to trigger stripping.
     const isGenerationDisallowed = context.generationAllowed === false || context.aiStrategy?.generationAllowed === false;
 
     if (isGenerationDisallowed) {
         sanitizedContext = {
             ...context,
-            // Flush Ghost Preview
-            previewUrl: undefined,
+            // PRESERVE previewUrl here to prevent flashing. The compositor will overwrite it shortly.
             // Flush Generative Intent
             aiStrategy: context.aiStrategy ? {
                 ...context.aiStrategy,
@@ -177,7 +176,6 @@ export const ProceduralStoreProvider: React.FC<{ children: React.ReactNode }> = 
             generationAllowed: false
         };
     } 
-    // PRESERVE GEOMETRIC PREVIEWS: Removed the GEOMETRIC reset block here to allow non-generative composites to persist.
 
     setResolvedRegistry(prev => {
       const nodeRecord = prev[nodeId] || {};

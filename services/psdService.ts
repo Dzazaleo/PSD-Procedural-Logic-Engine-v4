@@ -456,38 +456,65 @@ export const renderLayerToTarget = (
 
 /**
  * Utility 3: Recursively composites the TransformedLayer hierarchy using raw binary pixel data.
+ * Universal Compositor: Handles both Geometric pixels (ag-psd) and Generative assets (URL).
  * Traverses the visual tree bottom-up (Painter's Algorithm) to ensure correct z-index stacking.
  */
-export const compositeHierarchy = (
+export const compositeHierarchy = async (
   transformedLayers: TransformedLayer[], 
   sourcePsd: Psd, 
-  ctx: CanvasRenderingContext2D
+  ctx: CanvasRenderingContext2D,
+  generativePreviewUrl?: string
 ) => {
-  // Iterate in REVERSE to draw bottom layers first (Painter's Algorithm).
-  // The transformedLayers array usually follows Photoshop Top-Down order (0 is top).
-  for (let i = transformedLayers.length - 1; i >= 0; i--) {
-    const node = transformedLayers[i];
-    
-    // Visibility check
-    if (!node.isVisible) continue;
-
-    if (node.type === 'group' && node.children) {
-      // Recursion for groups
-      compositeHierarchy(node.children, sourcePsd, ctx);
-    } else {
-      // It's a pixel layer. Attempt to fetch binary data.
-      // Note: 'generative' layers have synthetic IDs and will return null here (skipped).
-      const sourceLayer = findLayerByPath(sourcePsd, node.id);
-      
-      if (sourceLayer) {
-        // Apply Opacity (ag-psd 0-255 handled in extraction? No, use metadata opacity)
-        const prevAlpha = ctx.globalAlpha;
-        ctx.globalAlpha = node.opacity; // node.opacity is 0-1
-        
-        renderLayerToTarget(sourceLayer, ctx, node);
-        
-        ctx.globalAlpha = prevAlpha;
+  // 1. Pre-load Generative Asset if available
+  // This ensures synchronous-like drawing loop without complex async rendering inside the loop
+  let genImage: HTMLImageElement | null = null;
+  if (generativePreviewUrl) {
+      try {
+          genImage = await new Promise<HTMLImageElement>((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => resolve(img);
+              img.onerror = () => reject(new Error("Failed to load generative asset"));
+              img.src = generativePreviewUrl;
+          });
+      } catch (e) {
+          console.warn("Universal Compositor: Skipping generative layer due to load error.", e);
       }
-    }
   }
+
+  // 2. Recursive Draw Function
+  const drawNode = (nodes: TransformedLayer[]) => {
+      // Iterate in REVERSE to draw bottom layers first (Painter's Algorithm).
+      // Standard PSD order: 0 is Top. Reverse traversal: Bottom -> Top.
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i];
+        
+        // Visibility check
+        if (!node.isVisible) continue;
+
+        if (node.children) {
+          // Recursion for groups
+          drawNode(node.children);
+          continue;
+        } 
+        
+        if (node.type === 'generative') {
+            // GENERATIVE BRANCH
+            if (genImage) {
+                // Generative layers track their destination coords directly
+                ctx.drawImage(genImage, node.coords.x, node.coords.y, node.coords.w, node.coords.h);
+            }
+        } else {
+            // GEOMETRIC BRANCH
+            const sourceLayer = findLayerByPath(sourcePsd, node.id);
+            if (sourceLayer) {
+                const prevAlpha = ctx.globalAlpha;
+                ctx.globalAlpha = node.opacity; // node.opacity is 0-1
+                renderLayerToTarget(sourceLayer, ctx, node);
+                ctx.globalAlpha = prevAlpha;
+            }
+        }
+      }
+  };
+
+  drawNode(transformedLayers);
 };

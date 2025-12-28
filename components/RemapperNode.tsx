@@ -2,7 +2,7 @@ import React, { memo, useMemo, useEffect, useCallback, useState, useRef } from '
 import { Handle, Position, NodeProps, useEdges, useReactFlow, useNodes } from 'reactflow';
 import { PSDNodeData, SerializableLayer, TransformedPayload, TransformedLayer, MAX_BOUNDARY_VIOLATION_PERCENT, LayoutStrategy } from '../types';
 import { useProceduralStore } from '../store/ProceduralContext';
-import { renderLayerToTarget, findLayerByPath } from '../services/psdService';
+import { compositeHierarchy, findLayerByPath } from '../services/psdService';
 import { GoogleGenAI } from "@google/genai";
 import { Check, Sparkles, Info, Layers, Box, Cpu } from 'lucide-react';
 
@@ -40,7 +40,7 @@ interface OverlayProps {
     sourceReference?: string;
     onImageLoad?: () => void;
     generationId?: number;
-    method?: string; // NEW: To display status badge
+    method?: string; // GEOMETRIC, HYBRID, GENERATIVE
 }
 
 const GenerativePreviewOverlay = ({ 
@@ -59,38 +59,48 @@ const GenerativePreviewOverlay = ({
     
     // STRICT CONFIRMATION LOGIC:
     // A view is confirmed ONLY if it matches the store's canonical URL AND the store is confirmed.
+    // For Geometric views, we treat them as confirmable snapshots.
     const isCurrentViewConfirmed = !!previewUrl && !!canonicalUrl && previewUrl === canonicalUrl && isStoreConfirmed;
 
-    // Button Visibility:
-    // Show 'Confirm' if the current view is NOT the confirmed one AND it's a generative/hybrid method.
-    // Geometric mirrors are auto-confirmed by nature (deterministic), so we can hide the manual confirm button for them usually,
-    // but the prompt implies universal behavior. However, confirming a geometric layout essentially locks it.
-    // For universal WYSIWYG, we allow locking any state.
+    // Show confirm button if we have a valid preview that isn't already locked
     const showConfirmButton = !!previewUrl && !isCurrentViewConfirmed && !isGenerating;
     
-    // Status Badge Logic
+    // --- Dynamic Status Badges ---
     let statusColor = 'bg-slate-900/80 text-slate-200 border-slate-500/50';
     let statusLabel = 'PREVIEW';
-    
+    let badgeBorder = 'border-slate-700/50';
+
     if (isGenerating) {
         statusColor = 'bg-purple-900/80 text-purple-200 border-purple-500/50';
         statusLabel = 'SYNTHESIZING...';
-    } else if (method === 'GENERATIVE') {
-        statusColor = isCurrentViewConfirmed 
-            ? 'bg-purple-900/80 text-purple-200 border-purple-500/50' 
-            : 'bg-indigo-900/80 text-indigo-200 border-indigo-500/50';
-        statusLabel = isCurrentViewConfirmed ? 'GENERATIVE LOCKED' : 'AI DRAFT';
-    } else if (method === 'HYBRID') {
-        statusColor = 'bg-pink-900/80 text-pink-200 border-pink-500/50';
-        statusLabel = 'HYBRID COMPOSITE';
+        badgeBorder = 'border-purple-500/30';
     } else {
-        // GEOMETRIC
-        statusColor = 'bg-emerald-900/80 text-emerald-200 border-emerald-500/50';
-        statusLabel = 'GEOMETRIC MIRROR';
+        switch (method) {
+            case 'HYBRID':
+                statusColor = 'bg-pink-900/80 text-pink-200 border-pink-500/50';
+                statusLabel = isCurrentViewConfirmed ? 'HYBRID LOCKED' : 'HYBRID ASSEMBLY';
+                badgeBorder = 'border-pink-500/30';
+                break;
+            case 'GENERATIVE':
+                statusColor = isCurrentViewConfirmed 
+                    ? 'bg-purple-900/80 text-purple-200 border-purple-500/50' 
+                    : 'bg-indigo-900/80 text-indigo-200 border-indigo-500/50';
+                statusLabel = isCurrentViewConfirmed ? 'GENERATIVE LOCKED' : 'GENERATIVE SYNTHESIS';
+                badgeBorder = 'border-indigo-500/30';
+                break;
+            case 'GEOMETRIC':
+            default:
+                statusColor = isCurrentViewConfirmed
+                    ? 'bg-emerald-900/80 text-emerald-200 border-emerald-500/50'
+                    : 'bg-emerald-900/60 text-emerald-300 border-emerald-500/30';
+                statusLabel = isCurrentViewConfirmed ? 'GEOMETRIC LOCKED' : 'GEOMETRIC MIRROR';
+                badgeBorder = 'border-emerald-500/30';
+                break;
+        }
     }
 
     return (
-        <div className={`relative w-full mt-2 rounded-md overflow-hidden bg-slate-900/50 border transition-all duration-500 flex justify-center flex-col items-center ${isGenerating ? 'border-indigo-500/30' : 'border-slate-700/50'}`}>
+        <div className={`relative w-full mt-2 rounded-md overflow-hidden bg-slate-900/50 border transition-all duration-500 flex justify-center flex-col items-center ${badgeBorder}`}>
              <div 
                 className="relative w-full max-w-full flex items-center justify-center overflow-hidden group shadow-inner bg-black/20"
                 style={{
@@ -124,7 +134,7 @@ const GenerativePreviewOverlay = ({
                  ) : (
                      <div className="absolute inset-0 flex items-center justify-center z-0">
                          <div className="text-[9px] text-slate-500 font-mono text-center px-4 animate-pulse">
-                             {isGenerating ? 'SYNTHESIZING...' : 'RENDERING COMPOSITE...'}
+                             {isGenerating ? 'SYNTHESIZING...' : 'RENDERING MIRROR...'}
                          </div>
                      </div>
                  )}
@@ -152,7 +162,7 @@ const GenerativePreviewOverlay = ({
                  )}
 
                  <div className="absolute bottom-2 left-2 z-20 flex items-center space-x-2 pointer-events-none">
-                     <span className={`text-[8px] px-1.5 py-0.5 rounded border backdrop-blur-sm shadow-[0_0_8px_rgba(0,0,0,0.5)] ${statusColor}`}>
+                     <span className={`text-[8px] px-1.5 py-0.5 rounded border backdrop-blur-sm shadow-[0_0_8px_rgba(0,0,0,0.5)] ${statusColor} uppercase tracking-wider font-bold`}>
                          {statusLabel}
                      </span>
                      {isGenerating && (
@@ -360,8 +370,8 @@ const RemapperInstanceRow = memo(({
 }) => {
     const [isInspectorOpen, setInspectorOpen] = useState(false);
 
-    // Universal Logic Gate: If we have a payload and no error, show the overlay.
-    // This allows Geometric composites to be visualized as first-class citizens.
+    // Universal Logic Gate: Show overlay if payload exists and is not in error.
+    // This removes legacy gates (isAwaiting, hasPreview) to support Geometric Mirroring.
     const showOverlay = !!instance.payload && instance.payload.status !== 'error';
 
     // Fetch History directly from Store Payload (Source of Truth for Navigation)
@@ -592,6 +602,9 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
   const [displayPreviews, setDisplayPreviews] = useState<Record<number, string>>({});
   const isTransitioningRef = useRef<Record<number, boolean>>({});
   const lastSynthesisSignatures = useRef<Record<number, string>>({});
+  
+  // Refinement Lock State: Track last known strategy signatures
+  const lastStrategySignature = useRef<Record<number, string>>({});
 
   const { setNodes } = useReactFlow();
   const edges = useEdges();
@@ -711,52 +724,9 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
-      // Helper to load image for Generative Layers
-      const loadImage = (src: string): Promise<HTMLImageElement> => {
-          return new Promise((resolve, reject) => {
-              const img = new Image();
-              img.onload = () => resolve(img);
-              img.onerror = reject;
-              img.src = src;
-          });
-      };
-
-      // Recursive Composite (Painter's Algorithm)
-      const processLayerTree = async (layers: TransformedLayer[]) => {
-          // Iterate Reverse (Bottom-Up)
-          for (let i = layers.length - 1; i >= 0; i--) {
-              const layer = layers[i];
-              if (!layer.isVisible) continue;
-
-              if (layer.children) {
-                  await processLayerTree(layer.children);
-                  continue;
-              }
-
-              if (layer.type === 'generative') {
-                  if (payload.previewUrl) {
-                      try {
-                          const img = await loadImage(payload.previewUrl);
-                          // Draw generative asset at specified coords
-                          ctx.drawImage(img, layer.coords.x, layer.coords.y, layer.coords.w, layer.coords.h);
-                      } catch (err) {
-                          console.warn('Failed to composite generative layer', err);
-                      }
-                  }
-              } else {
-                  // Geometric Layer
-                  const sourceLayer = findLayerByPath(sourcePsd, layer.id);
-                  if (sourceLayer) {
-                      const prevAlpha = ctx.globalAlpha;
-                      ctx.globalAlpha = layer.opacity;
-                      renderLayerToTarget(sourceLayer, ctx, layer);
-                      ctx.globalAlpha = prevAlpha;
-                  }
-              }
-          }
-      };
-
-      await processLayerTree(payload.layers);
+      // UNIVERSAL COMPOSITOR: Delegate to Service Layer
+      // Handles both Geometric pixels and Generative AI assets recursively
+      await compositeHierarchy(payload.layers, sourcePsd, ctx, payload.previewUrl);
 
       const compositeUrl = canvas.toDataURL('image/png');
 
@@ -1071,6 +1041,7 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
             
             lastSynthesisSignatures.current[index] = sig;
             
+            // UNIVERSAL: Composite everything (Geometric + Generative)
             compositeInstancePreview(index, payload, target.bounds);
         });
     }, 400); // 400ms Debounce
@@ -1104,15 +1075,25 @@ export const RemapperNode = memo(({ id, data }: NodeProps<PSDNodeData>) => {
         const hasPreview = !!(storePayload?.previewUrl);
         const needsInitialPreview = isAwaiting && hasPrompt && !hasPreview;
 
-        // GEOMETRIC RESET BLOCK REMOVED FOR UNIVERSAL WYSIWYG
-        // The geometric preview is now handled by the main synthesis loop above.
+        // AUTOMATED REFINEMENT LOCK
+        // Detects any change in the LayoutStrategy (Geometric override, Prompt update, etc.)
+        // and revokes the 'confirmed' status to force user review.
+        const currentStrategySignature = JSON.stringify({
+            method: strategy?.method,
+            prompt: strategy?.generativePrompt,
+            scale: strategy?.suggestedScale,
+            overrides: strategy?.overrides
+        });
+        
+        const lastSig = lastStrategySignature.current[idx];
+        const isStrategyChanged = lastSig && lastSig !== currentStrategySignature;
+        
+        if (currentStrategySignature) {
+            lastStrategySignature.current[idx] = currentStrategySignature;
+        }
 
-        // AUTOMATED REFINEMENT RESET
-        const lockedPrompt = confirmations[idx];
-        const isRefinementDetected = !!currentPrompt && !!lockedPrompt && currentPrompt !== lockedPrompt;
-
-        if (isRefinementDetected && storePayload?.isConfirmed) {
-             console.log(`[Remapper] Refinement detected for #${idx}. Revoking confirmation.`);
+        if (isStrategyChanged && storePayload?.isConfirmed) {
+             console.log(`[Remapper] Strategy change detected for #${idx}. Revoking confirmation.`);
              updatePayload(id, `result-out-${idx}`, { isConfirmed: false });
         }
 
