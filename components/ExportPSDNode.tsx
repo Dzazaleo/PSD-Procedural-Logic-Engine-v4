@@ -329,6 +329,13 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
         for (const metaLayer of transformedLayers) {
             let newLayer: Layer | undefined;
 
+            // Use Absolute Calculated Anchors from Remapper (transform.offsetX/Y)
+            // We use explicit integer rounding to avoid sub-pixel blurring in ag-psd
+            const absoluteLeft = Math.round(metaLayer.transform.offsetX);
+            const absoluteTop = Math.round(metaLayer.transform.offsetY);
+            const absoluteWidth = Math.round(metaLayer.coords.w);
+            const absoluteHeight = Math.round(metaLayer.coords.h);
+
             // BRANCH 1: Generative Layer (Synthetic)
             if (metaLayer.type === 'generative') {
                 const asset = assets.get(metaLayer.id);
@@ -336,10 +343,11 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
                 if (asset) {
                     newLayer = {
                         name: metaLayer.name,
-                        top: metaLayer.coords.y,
-                        left: metaLayer.coords.x,
-                        bottom: metaLayer.coords.y + metaLayer.coords.h,
-                        right: metaLayer.coords.x + metaLayer.coords.w,
+                        // ABSOLUTE POSITIONING ENFORCED
+                        left: absoluteLeft,
+                        top: absoluteTop,
+                        right: absoluteLeft + absoluteWidth,
+                        bottom: absoluteTop + absoluteHeight,
                         hidden: !metaLayer.isVisible,
                         opacity: metaLayer.opacity * 255,
                         canvas: asset // Inject synthetic pixel data
@@ -355,10 +363,11 @@ export const ExportPSDNode = memo(({ id }: NodeProps) => {
                 if (originalLayer) {
                     newLayer = {
                         ...originalLayer, // PRESERVE PROPERTIES from Binary
-                        top: metaLayer.coords.y,
-                        left: metaLayer.coords.x,
-                        bottom: metaLayer.coords.y + metaLayer.coords.h,
-                        right: metaLayer.coords.x + metaLayer.coords.w,
+                        // ABSOLUTE POSITIONING OVERRIDE (Resolves drift/offset errors)
+                        left: absoluteLeft,
+                        top: absoluteTop,
+                        right: absoluteLeft + absoluteWidth,
+                        bottom: absoluteTop + absoluteHeight,
                         hidden: !metaLayer.isVisible,
                         opacity: metaLayer.opacity * 255,
                         children: undefined

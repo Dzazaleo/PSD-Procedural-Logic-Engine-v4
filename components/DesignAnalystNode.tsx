@@ -630,10 +630,21 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
         2. 'anchor': The gravitational point (TOP, CENTER, BOTTOM, STRETCH) for the global fit.
         3. By default, all layers inherit this global scale and anchor.
 
+        HIERARCHY DECOUPLING & DISTRIBUTION (New Capability):
+        - You have the authority to decouple nested subgroups to redistribute them across the target canvas.
+        - 'decoupleHierarchy': Set to true if you are spreading vertical elements horizontally (or vice versa), breaking the original parent bounds.
+        - 'distributionType': Choose 'HORIZONTAL_SPREAD' for side-by-side layouts (grids), 'VERTICAL_STACK' for lists, or 'RADIAL_FOCUS' for center-out arrangements.
+
+        SEMANTIC CLUSTERING (Subgroup Logic):
+        - Identify logical units that must stay together (e.g., a Potion Bottle + its Quantity Label + Background Glow).
+        - Treat these as a "Semantic Cluster".
+        - Assign them a shared 'clusterId' (e.g., "cluster-potion-1") in the overrides array.
+        - Ensure all items in a cluster share relative positioning logic (e.g., if moving the bottle to x=100, move the label to x=100 so they stay aligned).
+
         OVERRIDE INTENT (Semantic Deviations):
         - You may generate an 'overrides' array to deviate specific layers from the global baseline.
-        - ONLY override a layer if its semantic role (e.g., a "WIN" button, a specific character, or a UI badge) specifically requires a different scale or position to maintain visual hierarchy.
-        - Do NOT override layers just to fill space if the global scale is sufficient.
+        - Use 'xOffset' and 'yOffset' (relative to Target Top-Left) to position these clusters explicitly in the new layout.
+        - ONLY override a layer if its semantic role specifically requires a different scale or position to maintain visual hierarchy.
 
         SPATIAL REASONING:
         - Analyze the collection of assets. ensure that the global scale does NOT cause critical content (like text or faces) to bleed off the target boundary.
@@ -742,6 +753,11 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
                     method: { type: Type.STRING, enum: ['GEOMETRIC', 'GENERATIVE', 'HYBRID'] },
                     suggestedScale: { type: Type.NUMBER },
                     anchor: { type: Type.STRING, enum: ['TOP', 'CENTER', 'BOTTOM', 'STRETCH'] },
+                    
+                    // NEW FIELDS
+                    decoupleHierarchy: { type: Type.BOOLEAN, description: "Set true to break original parent bounds for wide redistribution." },
+                    distributionType: { type: Type.STRING, enum: ['VERTICAL_STACK', 'HORIZONTAL_SPREAD', 'RADIAL_FOCUS'] },
+                    
                     generativePrompt: { type: Type.STRING },
                     reasoning: { type: Type.STRING },
                     clearance: { type: Type.BOOLEAN, description: "Set to true when resetting from Generative back to Geometric" },
@@ -752,6 +768,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
                             type: Type.OBJECT,
                             properties: {
                                 layerId: { type: Type.STRING },
+                                clusterId: { type: Type.STRING, description: "Shared ID for items moving together (e.g. 'cluster-1')" }, // NEW
                                 xOffset: { type: Type.NUMBER },
                                 yOffset: { type: Type.NUMBER },
                                 individualScale: { type: Type.NUMBER }
@@ -768,7 +785,7 @@ export const DesignAnalystNode = memo(({ id, data }: NodeProps<PSDNodeData>) => 
                         required: ['allowedBleed', 'violationCount']
                     }
                 },
-                required: ['method', 'suggestedScale', 'anchor', 'generativePrompt', 'reasoning', 'clearance', 'overrides', 'safetyReport', 'knowledgeApplied']
+                required: ['method', 'suggestedScale', 'anchor', 'decoupleHierarchy', 'distributionType', 'generativePrompt', 'reasoning', 'clearance', 'overrides', 'safetyReport', 'knowledgeApplied']
             }
         };
         

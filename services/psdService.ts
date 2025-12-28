@@ -434,6 +434,7 @@ export const getLayerCanvas = (layer: Layer): HTMLCanvasElement => {
 /**
  * Utility 2: Renders a source ag-psd Layer onto a target context using transformation metadata.
  * Applies the calculated scale and offset to place pixels accurately.
+ * CRITICAL: Uses Math.round() for pixel-perfect integer alignment, preventing sub-pixel blurring.
  */
 export const renderLayerToTarget = (
   sourceLayer: Layer, 
@@ -446,12 +447,14 @@ export const renderLayerToTarget = (
   const canvas = getLayerCanvas(sourceLayer);
   const { offsetX, offsetY } = metadata.transform;
   
-  // The 'coords' width/height in TransformedLayer represents the *final* visual size
-  // which already includes the scaleX/scaleY factors applied to the original bounds.
-  const destW = metadata.coords.w;
-  const destH = metadata.coords.h;
+  // Use explicit dimensions from metadata (already scaled)
+  // We round coordinates to prevent sub-pixel drift which blurs the output
+  const destX = Math.round(offsetX);
+  const destY = Math.round(offsetY);
+  const destW = Math.round(metadata.coords.w);
+  const destH = Math.round(metadata.coords.h);
 
-  ctx.drawImage(canvas, offsetX, offsetY, destW, destH);
+  ctx.drawImage(canvas, destX, destY, destW, destH);
 };
 
 /**
@@ -492,7 +495,8 @@ export const compositeHierarchy = async (
         if (!node.isVisible) continue;
 
         if (node.children) {
-          // Recursion for groups
+          // Recursion for groups: Draw children first (contained within), but wait...
+          // In PSD, groups are just folders. We just process the children in z-order.
           drawNode(node.children);
           continue;
         } 
@@ -500,8 +504,12 @@ export const compositeHierarchy = async (
         if (node.type === 'generative') {
             // GENERATIVE BRANCH
             if (genImage) {
-                // Generative layers track their destination coords directly
-                ctx.drawImage(genImage, node.coords.x, node.coords.y, node.coords.w, node.coords.h);
+                // Round coordinates for generative assets too
+                const destX = Math.round(node.coords.x);
+                const destY = Math.round(node.coords.y);
+                const destW = Math.round(node.coords.w);
+                const destH = Math.round(node.coords.h);
+                ctx.drawImage(genImage, destX, destY, destW, destH);
             }
         } else {
             // GEOMETRIC BRANCH
